@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     postgres_db: str = "appdb"
     postgres_user: str = ""
     postgres_sslmode: str = "require"
+    # Local dev only (docker-compose). In Azure this stays empty and access is
+    # via an Entra access token (keyless).
+    postgres_password: str = ""
+
+    # RAG
+    retrieval_top_k: int = 4
+    chat_max_completion_tokens: int = 1024
 
     # Auth: Easy Auth (Entra) fronts the app in Azure. This flag only bypasses
     # local checks for dev — it MUST be false anywhere deployed.

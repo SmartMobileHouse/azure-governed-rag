@@ -20,6 +20,11 @@ dependencies = [
   "openai>=1.54,<2",
   "azure-ai-contentsafety>=1.0,<2",
   "psycopg[binary]>=3.2,<4",
+  # M1 — RAG + orchestration. LangGraph is pinned below the next minor because
+  # its 0.x APIs (including interrupt) move between minors.
+  "langgraph>=0.6,<0.7",
+  "langgraph-checkpoint-postgres>=2.0,<3",
+  "pgvector>=0.3,<0.4",
 ]
 
 [dependency-groups]
