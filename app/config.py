@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # "low" keeps reasoning minimal — enough for grounded RAG answers with cites.
     chat_reasoning_effort: str = "low"
 
+    # M2 safety layer
+    safety_enabled: bool = True  # Prompt Shields on input + chunks
+    groundedness_enabled: bool = True  # LLM self-check on the answer
+    # When a safety check *itself* errors (service down/unreachable): False = allow
+    # but flag the failure (fail-open, availability-first); True = block/degrade
+    # (fail-closed, strict). Positive detections always act regardless of this.
+    safety_fail_closed: bool = False
+
     # Seed the bundled sample corpus on startup if the store is empty, so a fresh
     # deploy has a working /chat out of the box. Set false to disable.
     seed_on_startup: bool = True

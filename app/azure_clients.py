@@ -29,3 +29,13 @@ def content_safety_client() -> ContentSafetyClient:
     return ContentSafetyClient(
         endpoint=settings.content_safety_endpoint, credential=_credential
     )
+
+
+def cognitive_token() -> str:
+    """Bearer token for Cognitive Services data-plane REST (keyless).
+
+    Used for operations the typed SDK doesn't expose cleanly — e.g. Content
+    Safety Prompt Shields, whose ``text:shieldPrompt`` URL the SDK pipeline
+    percent-encodes the ``:`` in (→ 404). A direct POST keeps the literal colon.
+    """
+    return _credential.get_token(_COGNITIVE_SCOPE).token
