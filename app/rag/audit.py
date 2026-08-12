@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -69,14 +70,34 @@ def _hash(text: str | None) -> str | None:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
 
 
+_SENSITIVE_TERMS_RE = re.compile(r"sensitive terms: ([^;]+)")
+
+
+def _redact_reason(reason: str | None) -> str | None:
+    """Replace matched sensitive-term literals (derived from the question) with
+    just their count, so no question-derived text is persisted in the audit."""
+    if not reason:
+        return reason
+
+    def _count(m: re.Match) -> str:
+        n = len([t for t in m.group(1).split(",") if t.strip()])
+        return f"sensitive terms matched ({n})"
+
+    return _SENSITIVE_TERMS_RE.sub(_count, reason)
+
+
 def _redact_governance(gov: dict | None) -> dict:
-    """Copy the governance verdicts, replacing the approver email with its hash."""
+    """Copy the governance verdicts, stripping anything derived from raw input:
+    the approver email becomes a hash and matched sensitive terms become a count."""
     if not gov:
         return {}
     out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in gov.items()}
     approval = out.get("approval")
-    if isinstance(approval, dict) and approval.get("approver"):
-        approval["approver_hash"] = _hash(approval.pop("approver"))
+    if isinstance(approval, dict):
+        if approval.get("approver"):
+            approval["approver_hash"] = _hash(approval.pop("approver"))
+        if approval.get("reason"):
+            approval["reason"] = _redact_reason(approval["reason"])
     return out
 
 
