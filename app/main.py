@@ -26,11 +26,12 @@ async def lifespan(_: FastAPI):
     # Best-effort migrations so the app is self-bootstrapping; never block startup
     # on the DB (keeps /health up even if Postgres is briefly unreachable).
     try:
-        from .rag import graph, store
+        from .rag import audit, graph, store
 
         store.init_schema()
         graph.setup_checkpointer()
-        log.info("migrations applied (schema + checkpointer)")
+        audit.init_schema()
+        log.info("migrations applied (schema + checkpointer + audit)")
     except Exception as e:  # noqa: BLE001
         log.warning("startup migration skipped: %s", e)
 
@@ -82,19 +83,19 @@ class ChatRequest(BaseModel):
     thread_id: str | None = None
 
 
+def _principal(request: Request) -> str:
+    # Easy Auth injects the caller identity; fall back for local dev.
+    return request.headers.get("x-ms-client-principal-name") or "local-dev"
+
+
 @app.post("/chat")
-def chat(req: ChatRequest) -> dict:
+def chat(req: ChatRequest, request: Request) -> dict:
     from .rag import graph
 
     thread_id = req.thread_id or f"t-{uuid.uuid4().hex}"
     # Returns {status: complete, ...} or {status: pending_approval, ...} when the
     # turn parks at the human approval gate. Response already carries thread_id.
-    return graph.answer(req.message, thread_id)
-
-
-def _approver(request: Request) -> str:
-    # Easy Auth injects the caller identity; fall back for local dev.
-    return request.headers.get("x-ms-client-principal-name") or "local-dev"
+    return graph.answer(req.message, thread_id, actor=_principal(request))
 
 
 def _authorized(approver: str) -> bool:
@@ -105,7 +106,7 @@ def _authorized(approver: str) -> bool:
 def _decide(thread_id: str, approved: bool, request: Request) -> dict:
     from .rag import graph
 
-    approver = _approver(request)
+    approver = _principal(request)
     if not _authorized(approver):
         raise HTTPException(status_code=403, detail="not an authorized approver")
     result = graph.resume(thread_id, approved=approved, approver=approver)
@@ -124,3 +125,11 @@ def approve(thread_id: str, request: Request) -> dict:
 def reject(thread_id: str, request: Request) -> dict:
     """Withhold a parked answer. Idempotent; approver from Easy Auth identity."""
     return _decide(thread_id, False, request)
+
+
+@app.get("/threads/{thread_id}/audit")
+def thread_audit(thread_id: str) -> dict:
+    """The turn's decision trail — hashed excerpts, pseudonymous actor, versions."""
+    from .rag import audit
+
+    return {"thread_id": thread_id, "events": audit.for_thread(thread_id)}

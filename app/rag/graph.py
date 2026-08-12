@@ -28,7 +28,7 @@ from langgraph.types import Command, interrupt
 
 from .. import db
 from ..config import settings
-from . import llm, safety, store
+from . import audit, llm, safety, store
 
 _REFUSAL = (
     "This request was blocked by the safety layer — it looks like a prompt-injection "
@@ -229,24 +229,56 @@ def _shape(result: dict, thread_id: str) -> dict:
     }
 
 
-def answer(question: str, thread_id: str) -> dict:
+def _audit(result: dict, thread_id: str, actor: str | None, checkpoint_id: str | None) -> None:
+    """Record one privacy-safe audit event for the transition just made."""
+    interrupts = result.get("__interrupt__")
+    if interrupts:
+        payload = interrupts[0].value
+        audit.record(
+            thread_id=thread_id, decision="pending", actor=actor,
+            question=payload.get("question"), answer=payload.get("answer_preview"),
+            sources=payload.get("sources"), governance=result.get("governance"),
+            checkpoint_id=checkpoint_id,
+        )
+        return
+    approved = result.get("approved")
+    decision = (
+        "blocked" if result.get("blocked")
+        else "approved" if approved is True
+        else "rejected" if approved is False
+        else "answered"
+    )
+    contexts = result.get("contexts", [])
+    audit.record(
+        thread_id=thread_id, decision=decision, actor=actor,
+        question=result.get("question"), answer=result.get("answer"),
+        sources=[f"{c['doc_id']}:{c['ordinal']}" for c in contexts],
+        governance=result.get("governance"), checkpoint_id=checkpoint_id,
+    )
+
+
+def _checkpoint_id(graph, cfg: dict) -> str | None:
+    return graph.get_state(cfg).config.get("configurable", {}).get("checkpoint_id")
+
+
+def answer(question: str, thread_id: str, actor: str | None = None) -> dict:
     """Run the graph for one turn, persisting state under thread_id.
 
     Returns a ``complete`` response, or ``pending_approval`` if the turn hit the
     human approval gate (state is durably parked under thread_id until resumed).
     """
+    cfg = {"configurable": {"thread_id": thread_id}}
     with PostgresSaver.from_conn_string(db.conn_string()) as cp:
         graph = _builder().compile(checkpointer=cp)
-        result = graph.invoke(
-            {"question": question},
-            config={"configurable": {"thread_id": thread_id}},
-        )
+        result = graph.invoke({"question": question}, config=cfg)
+        checkpoint_id = _checkpoint_id(graph, cfg)
+    _audit(result, thread_id, actor, checkpoint_id)
     return _shape(result, thread_id)
 
 
 def resume(thread_id: str, approved: bool, approver: str | None) -> dict:
     """Resume a parked turn with a human decision. Idempotent: a thread that is
-    already resolved returns its final state without re-running."""
+    already resolved returns its final state without re-running (or re-auditing)."""
     cfg = {"configurable": {"thread_id": thread_id}}
     with PostgresSaver.from_conn_string(db.conn_string()) as cp:
         graph = _builder().compile(checkpointer=cp)
@@ -258,4 +290,6 @@ def resume(thread_id: str, approved: bool, approver: str | None) -> dict:
         result = graph.invoke(
             Command(resume={"approved": approved, "approver": approver}), cfg
         )
+        checkpoint_id = _checkpoint_id(graph, cfg)
+    _audit(result, thread_id, approver, checkpoint_id)
     return _shape(result, thread_id)
