@@ -15,6 +15,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+# Bundled sample corpus — seeded into pgvector on first startup (see main.lifespan)
+COPY docs/sample-corpus ./docs/sample-corpus
 
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

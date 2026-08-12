@@ -22,8 +22,10 @@ def _check_chat() -> dict:
         r = openai_client().chat.completions.create(
             model=settings.azure_openai_chat_deployment,
             messages=[{"role": "user", "content": "Reply with the single word: pong"}],
-            # gpt-5 / reasoning models require max_completion_tokens (not max_tokens).
-            max_completion_tokens=16,
+            # gpt-5 / reasoning models require max_completion_tokens (not max_tokens),
+            # and spend it on reasoning first — minimal effort leaves room for output.
+            max_completion_tokens=64,
+            reasoning_effort="minimal",
         )
         return {"ok": True, "sample": (r.choices[0].message.content or "").strip()[:20]}
     except Exception as e:  # noqa: BLE001 - smoke check reports, never raises

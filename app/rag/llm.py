@@ -36,5 +36,6 @@ def generate(question: str, contexts: list[dict]) -> str:
             {"role": "user", "content": f"Context:\n{context_block}\n\nQuestion: {question}"},
         ],
         max_completion_tokens=settings.chat_max_completion_tokens,
+        reasoning_effort=settings.chat_reasoning_effort,
     )
     return (resp.choices[0].message.content or "").strip()

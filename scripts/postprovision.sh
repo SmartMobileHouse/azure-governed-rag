@@ -88,11 +88,33 @@ if [ -z "${APP_ID}" ] || [ "${APP_ID}" = "null" ]; then
     --query appId -o tsv)"
   az ad sp create --id "${APP_ID}" >/dev/null 2>&1 || true
 fi
-echo "  Enforcing Entra auth (client ${APP_ID})…"
+# Expose the app as an API resource so a bearer token can target it
+# (aud = api://<appId>). Without this, tokens have no matching audience → 401.
+API_AUDIENCE="api://${APP_ID}"
+az ad app update --id "${APP_ID}" --identifier-uris "${API_AUDIENCE}" >/dev/null 2>&1 || true
+
+# Expose a delegated scope and pre-authorize the Azure CLI, so a developer can
+# mint a bearer token (aud = api://<appId>) with NO interactive consent:
+#   az account get-access-token --resource api://<appId>
+# Idempotent: reuse the existing scope id if user_impersonation already exists.
+CLI_APP_ID="04b07795-8ddb-461a-bbee-02f9e1bf7b46"  # Microsoft Azure CLI (public client)
+GRAPH="https://graph.microsoft.com/v1.0/applications(appId=%27${APP_ID}%27)"
+SCOPE_ID="$(az rest --method GET --uri "${GRAPH}?\$select=api" \
+  --query "api.oauth2PermissionScopes[?value=='user_impersonation'].id | [0]" -o tsv 2>/dev/null)"
+if [ -z "${SCOPE_ID}" ] || [ "${SCOPE_ID}" = "null" ]; then
+  SCOPE_ID="$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z' || python3 -c 'import uuid;print(uuid.uuid4())')"
+  az rest --method PATCH --uri "${GRAPH}" --headers "Content-Type=application/json" \
+    --body "{\"api\":{\"oauth2PermissionScopes\":[{\"id\":\"${SCOPE_ID}\",\"isEnabled\":true,\"type\":\"User\",\"value\":\"user_impersonation\",\"adminConsentDisplayName\":\"Access azure-governed-rag\",\"adminConsentDescription\":\"Access azure-governed-rag as the signed-in user.\",\"userConsentDisplayName\":\"Access azure-governed-rag\",\"userConsentDescription\":\"Access azure-governed-rag on your behalf.\"}]}}" >/dev/null 2>&1 || true
+fi
+az rest --method PATCH --uri "${GRAPH}" --headers "Content-Type=application/json" \
+  --body "{\"api\":{\"preAuthorizedApplications\":[{\"appId\":\"${CLI_APP_ID}\",\"delegatedPermissionIds\":[\"${SCOPE_ID}\"]}]}}" >/dev/null 2>&1 || true
+
+echo "  Enforcing Entra auth (client ${APP_ID}, audience ${API_AUDIENCE})…"
 az containerapp auth microsoft update \
   --resource-group "${AZURE_RESOURCE_GROUP}" --name "${SERVICE_WEB_NAME}" \
   --client-id "${APP_ID}" \
   --issuer "https://login.microsoftonline.com/${AZURE_TENANT_ID}/v2.0" \
+  --allowed-token-audiences "${API_AUDIENCE}" \
   --yes >/dev/null
 az containerapp auth update \
   --resource-group "${AZURE_RESOURCE_GROUP}" --name "${SERVICE_WEB_NAME}" \
@@ -101,4 +123,4 @@ az containerapp auth update \
 
 echo "── postprovision complete ──"
 echo "  App (Entra-protected): ${APP_URL}"
-echo "  Smoke test:  curl -H \"Authorization: Bearer \$(az account get-access-token --resource ${APP_ID} --query accessToken -o tsv)\" ${APP_URL}/smoke"
+echo "  Smoke test:  curl -H \"Authorization: Bearer \$(az account get-access-token --resource ${API_AUDIENCE} --query accessToken -o tsv)\" ${APP_URL}/smoke"

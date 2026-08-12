@@ -33,6 +33,18 @@ async def lifespan(_: FastAPI):
         log.info("migrations applied (schema + checkpointer)")
     except Exception as e:  # noqa: BLE001
         log.warning("startup migration skipped: %s", e)
+
+    # Seed the bundled corpus so a fresh deploy has a working /chat. Best-effort
+    # and only when the store is empty — never blocks startup, never clobbers data.
+    if settings.seed_on_startup:
+        try:
+            from .rag import ingest
+
+            seeded = ingest.seed_if_empty(settings.seed_corpus_dir)
+            if seeded:
+                log.info("seeded sample corpus: %s", seeded)
+        except Exception as e:  # noqa: BLE001
+            log.warning("corpus seed skipped: %s", e)
     yield
 
 

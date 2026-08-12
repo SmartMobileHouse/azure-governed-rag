@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     # RAG
     retrieval_top_k: int = 4
     chat_max_completion_tokens: int = 1024
+    # gpt-5 reasoning models spend the completion budget on reasoning first; with
+    # a full context an unbounded effort exhausts it and returns empty content.
+    # "low" keeps reasoning minimal — enough for grounded RAG answers with cites.
+    chat_reasoning_effort: str = "low"
+
+    # Seed the bundled sample corpus on startup if the store is empty, so a fresh
+    # deploy has a working /chat out of the box. Set false to disable.
+    seed_on_startup: bool = True
+    seed_corpus_dir: str = "docs/sample-corpus"
 
     # Auth: Easy Auth (Entra) fronts the app in Azure. This flag only bypasses
     # local checks for dev — it MUST be false anywhere deployed.

@@ -15,18 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.rag import graph, llm, store
-
-
-def chunk_text(text: str, size: int = 800, overlap: int = 100) -> list[str]:
-    text = text.strip()
-    if len(text) <= size:
-        return [text] if text else []
-    chunks, start = [], 0
-    while start < len(text):
-        chunks.append(text[start : start + size])
-        start += size - overlap
-    return chunks
+from app.rag import graph, ingest
 
 
 def main() -> None:
@@ -35,35 +24,14 @@ def main() -> None:
     args = ap.parse_args()
 
     print("Running migrations (schema + checkpointer)…")
-    store.init_schema()
-    graph.setup_checkpointer()
+    graph.setup_checkpointer()  # ingest_dir handles the store schema
 
-    files = sorted(
-        f for f in os.listdir(args.dir) if f.endswith((".md", ".txt"))
-    )
-    if not files:
-        print(f"No .md/.txt files in {args.dir}")
+    result = ingest.ingest_dir(args.dir)
+    if not result:
+        print(f"No .md/.txt content in {args.dir}")
         return
-
-    for fname in files:
-        path = os.path.join(args.dir, fname)
-        doc_id = os.path.splitext(fname)[0]
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-        pieces = chunk_text(text)
-        embeddings = llm.embed(pieces)
-        chunks = [
-            {
-                "ordinal": i,
-                "content": piece,
-                "embedding": emb,
-                "metadata": {"source": fname, "title": doc_id},
-            }
-            for i, (piece, emb) in enumerate(zip(pieces, embeddings))
-        ]
-        n = store.upsert_document(doc_id, chunks)
+    for doc_id, n in result.items():
         print(f"  {doc_id}: {n} chunks")
-
     print("Done.")
 
 

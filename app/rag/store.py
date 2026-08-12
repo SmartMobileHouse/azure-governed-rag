@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from pgvector.psycopg import register_vector
+import psycopg
+from pgvector.psycopg import Vector, register_vector
 from psycopg.types.json import Jsonb
 
 from .. import db
 
+log = logging.getLogger("app.store")
+
 EMBED_DIM = 1536  # text-embedding-3-small
 
 _SCHEMA = f"""
-CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS rag_chunks (
     id          text PRIMARY KEY,
     doc_id      text NOT NULL,
@@ -36,7 +39,23 @@ def _connect():
 
 def init_schema() -> None:
     with _connect() as conn, conn.cursor() as cur:
+        # The `vector` extension needs azure_pg_admin, so on Azure it is
+        # provisioned by the deploy hook and the app's managed-identity role
+        # can't (re)create it — tolerate that failure. Locally (docker superuser)
+        # this creates it. Autocommit means a failed statement doesn't poison
+        # the CREATE TABLE that follows.
+        try:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        except psycopg.Error as e:
+            log.info("CREATE EXTENSION vector skipped (hook-provisioned on Azure): %s", e)
         cur.execute(_SCHEMA)
+
+
+def count() -> int:
+    """Number of stored chunks (0 on a fresh store). Assumes init_schema ran."""
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM rag_chunks")
+        return int(cur.fetchone()[0])
 
 
 def upsert_document(doc_id: str, chunks: list[dict[str, Any]]) -> int:
@@ -56,7 +75,9 @@ def upsert_document(doc_id: str, chunks: list[dict[str, Any]]) -> int:
                     doc_id,
                     c["ordinal"],
                     c["content"],
-                    c["embedding"],
+                    # Wrap in Vector so it adapts to the pgvector type; a bare
+                    # list would be sent as double precision[] and rejected.
+                    Vector(c["embedding"]),
                     Jsonb(c.get("metadata", {})),
                 ),
             )
@@ -69,6 +90,7 @@ def delete_document(doc_id: str) -> None:
 
 
 def similarity_search(query_embedding: list[float], k: int = 4) -> list[dict[str, Any]]:
+    qv = Vector(query_embedding)  # adapt to pgvector; a bare list becomes float8[]
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
             """SELECT content, doc_id, ordinal, metadata,
@@ -76,7 +98,7 @@ def similarity_search(query_embedding: list[float], k: int = 4) -> list[dict[str
                FROM rag_chunks
                ORDER BY embedding <=> %s
                LIMIT %s""",
-            (query_embedding, query_embedding, k),
+            (qv, qv, k),
         )
         rows = cur.fetchall()
     return [
