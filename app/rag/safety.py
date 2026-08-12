@@ -117,9 +117,11 @@ def detect_pii(text: str) -> dict:
     """
     result = {"ok": True, "redacted": text, "categories": {}, "count": 0, "error": None}
     try:
-        resp = language_client().recognize_pii_entities(
-            [text], disable_service_logs=True
-        )[0]
+        kwargs: dict = {"disable_service_logs": True}
+        cats = [c.strip() for c in settings.pii_categories.split(",") if c.strip()]
+        if cats:
+            kwargs["categories_filter"] = cats
+        resp = language_client().recognize_pii_entities([text], **kwargs)[0]
         if resp.is_error:
             raise RuntimeError(f"{resp.error.code}: {resp.error.message}")
         result["redacted"] = resp.redacted_text

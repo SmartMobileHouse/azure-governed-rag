@@ -47,6 +47,14 @@ class Settings(BaseSettings):
 
     # M2 slice 2 — PII detection/redaction on the answer (Azure AI Language)
     pii_enabled: bool = True
+    # Allowlist of PII categories to redact (comma-separated Azure Language
+    # category names). Restricts detection to genuinely sensitive entities —
+    # notably EXCLUDING PersonType (job titles) and Organization, whose default
+    # detection over-redacts normal prose. Empty = detect all categories.
+    pii_categories: str = (
+        "Person,Email,PhoneNumber,Address,CreditCardNumber,USSocialSecurityNumber,"
+        "InternationalBankingAccountNumber,ABARoutingNumber,SWIFTCode,IPAddress"
+    )
 
     # M3 human-in-the-loop approval gate
     hitl_enabled: bool = True
