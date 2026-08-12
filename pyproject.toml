@@ -1,0 +1,38 @@
+[project]
+name = "azure-governed-rag"
+version = "0.1.0"
+description = "A governed, deploy-in-one-command RAG assistant on Azure AI Foundry, orchestrated with LangGraph."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Smart Mobile House" }]
+
+# M0 = thin vertical slice: enough to prove MI-auth'd chat + embedding + Content
+# Safety + Postgres/pgvector + a checkpoint migration actually work end to end.
+# The LangGraph stack (langgraph, langgraph-checkpoint-postgres, langchain-*,
+# pgvector, azure-ai-textanalytics) is pinned and added in M1/M2.
+dependencies = [
+  "fastapi>=0.115,<0.116",
+  "uvicorn[standard]>=0.32,<0.35",
+  "pydantic-settings>=2.5,<3",
+  "azure-identity>=1.19,<2",
+  "azure-monitor-opentelemetry>=1.6,<2",
+  "openai>=1.54,<2",
+  "azure-ai-contentsafety>=1.0,<2",
+  "psycopg[binary]>=3.2,<4",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.7"]
+
+# Deployable application, not a distributable library — uv just manages the env.
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+# App package lives at the repo root (non-package project), so put it on the path.
+pythonpath = ["."]

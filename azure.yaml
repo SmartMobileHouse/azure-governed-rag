@@ -1,0 +1,29 @@
+# Azure Developer CLI (azd) project definition.
+# `azd up` provisions infra/ (Bicep) and deploys the container app.
+# Docs: https://learn.microsoft.com/azure/developer/azure-developer-cli/
+name: azure-governed-rag
+metadata:
+  template: azure-governed-rag@0.1.0
+
+services:
+  web:
+    project: .
+    language: python
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+      context: .
+      # Build the image remotely in ACR (native amd64) instead of locally.
+      # Avoids local Docker/Podman + QEMU emulation entirely — the cleanest path
+      # on Apple Silicon, and faster besides.
+      remoteBuild: true
+
+hooks:
+  preprovision:
+    shell: sh
+    run: ./scripts/preflight.sh
+    continueOnError: true
+  postprovision:
+    shell: sh
+    run: ./scripts/postprovision.sh
+    continueOnError: false

@@ -1,0 +1,33 @@
+name: ci
+
+# Minimal build+lint+test from M0 (not M4) — this repo is published as an
+# authority artifact, so main should never be red. Eval gates are added in M4.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync (with dev deps)
+        run: uv sync
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Build image
+        run: docker build -t azure-governed-rag:ci .
