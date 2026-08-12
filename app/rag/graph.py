@@ -50,6 +50,7 @@ class RagState(TypedDict, total=False):
     blocked: bool
     block_reason: str
     grounded: bool
+    pii_found: bool
     approved: bool
     governance: dict[str, Any]
 
@@ -133,12 +134,42 @@ def _check_groundedness(state: RagState) -> dict:
     return out
 
 
+def _redact_pii(state: RagState) -> dict:
+    """Mask PII in the answer via Azure AI Language; record types + counts only.
+
+    Runs regardless of HITL. Records entity *categories* and counts (never the
+    raw values). On a failed check: fail-open returns the answer as-is (flagged);
+    fail-closed withholds it.
+    """
+    gov = dict(state.get("governance", {}))
+    answer = state.get("answer", "")
+    if not settings.pii_enabled or not answer:
+        gov["pii"] = {"status": "disabled" if not settings.pii_enabled else "no-answer"}
+        return {"governance": gov}
+    res = safety.detect_pii(answer)
+    gov["pii"] = {
+        "ok": res["ok"],
+        "categories": res["categories"],
+        "count": res["count"],
+        "error": res["error"],
+    }
+    out: dict = {"governance": gov}
+    if res["ok"] and res["count"] > 0:
+        out["answer"] = res["redacted"]  # mask the PII in the returned answer
+        out["pii_found"] = True
+    elif not res["ok"] and settings.safety_fail_closed:
+        out["answer"] = "[answer withheld: PII check unavailable]"
+    return out
+
+
 def _needs_approval(state: RagState) -> tuple[bool, str]:
     """Decide whether a turn requires human sign-off, and why. Pure — safe to
     call before ``interrupt`` (which re-executes the node head on resume)."""
     reasons: list[str] = []
     if not state.get("grounded", True):
         reasons.append("low groundedness")
+    if settings.hitl_on_pii and state.get("pii_found"):
+        reasons.append("PII detected in answer")
     terms = [t.strip().lower() for t in settings.hitl_sensitive_terms.split(",") if t.strip()]
     haystack = f"{state.get('question', '')} {state.get('answer', '')}".lower()
     hits = [t for t in terms if t in haystack]
@@ -147,7 +178,7 @@ def _needs_approval(state: RagState) -> tuple[bool, str]:
     return bool(reasons), "; ".join(reasons)
 
 
-def _route_after_groundedness(state: RagState) -> str:
+def _route_after_checks(state: RagState) -> str:
     if not settings.hitl_enabled:
         return "end"
     needs, _ = _needs_approval(state)
@@ -189,6 +220,7 @@ def _builder() -> StateGraph:
     g.add_node("shield_chunks", _shield_chunks)
     g.add_node("generate", _generate)
     g.add_node("groundedness", _check_groundedness)
+    g.add_node("pii", _redact_pii)
     g.add_node("approval_gate", _approval_gate)
     g.add_edge(START, "guard_input")
     g.add_conditional_edges(
@@ -197,8 +229,9 @@ def _builder() -> StateGraph:
     g.add_edge("retrieve", "shield_chunks")
     g.add_edge("shield_chunks", "generate")
     g.add_edge("generate", "groundedness")
+    g.add_edge("groundedness", "pii")
     g.add_conditional_edges(
-        "groundedness", _route_after_groundedness, {"approval_gate": "approval_gate", "end": END}
+        "pii", _route_after_checks, {"approval_gate": "approval_gate", "end": END}
     )
     g.add_edge("approval_gate", END)
     return g

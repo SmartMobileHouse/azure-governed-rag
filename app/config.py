@@ -45,8 +45,13 @@ class Settings(BaseSettings):
     # (fail-closed, strict). Positive detections always act regardless of this.
     safety_fail_closed: bool = False
 
+    # M2 slice 2 — PII detection/redaction on the answer (Azure AI Language)
+    pii_enabled: bool = True
+
     # M3 human-in-the-loop approval gate
     hitl_enabled: bool = True
+    # Also route answers that contain PII to the human approval gate.
+    hitl_on_pii: bool = False
     # Comma-separated terms; if the question or answer contains one (case-
     # insensitive), the turn requires human approval — in addition to low
     # groundedness. A deterministic trigger for demos and sensitive topics.

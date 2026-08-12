@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from azure.ai.contentsafety import ContentSafetyClient
+from azure.ai.textanalytics import TextAnalyticsClient
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from openai import AzureOpenAI
 
@@ -28,6 +29,12 @@ def openai_client() -> AzureOpenAI:
 def content_safety_client() -> ContentSafetyClient:
     return ContentSafetyClient(
         endpoint=settings.content_safety_endpoint, credential=_credential
+    )
+
+
+def language_client() -> TextAnalyticsClient:
+    return TextAnalyticsClient(
+        endpoint=settings.language_endpoint, credential=_credential
     )
 
 

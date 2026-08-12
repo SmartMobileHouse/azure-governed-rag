@@ -22,7 +22,7 @@ import logging
 
 import httpx
 
-from ..azure_clients import cognitive_token, openai_client
+from ..azure_clients import cognitive_token, language_client, openai_client
 from ..config import settings
 
 log = logging.getLogger("app.safety")
@@ -102,6 +102,34 @@ def check_groundedness(answer: str, context_block: str) -> dict:
             result["reason"] = reason.strip()[:200]
     except Exception as e:  # noqa: BLE001
         log.warning("groundedness check failed: %s", e)
+        result["ok"] = False
+        result["error"] = str(e)[:200]
+    return result
+
+
+def detect_pii(text: str) -> dict:
+    """Detect PII in text via Azure AI Language and return a masked version.
+
+    Returns ``{ok, redacted, categories, count, error}`` where ``categories`` is
+    ``{category: count}`` — entity *types* only, never the raw values. On failure
+    ``redacted`` is the original text (fail-open shape); callers inspect ``ok``.
+    ``disable_service_logs`` stops Azure from retaining the submitted text.
+    """
+    result = {"ok": True, "redacted": text, "categories": {}, "count": 0, "error": None}
+    try:
+        resp = language_client().recognize_pii_entities(
+            [text], disable_service_logs=True
+        )[0]
+        if resp.is_error:
+            raise RuntimeError(f"{resp.error.code}: {resp.error.message}")
+        result["redacted"] = resp.redacted_text
+        categories: dict[str, int] = {}
+        for entity in resp.entities:
+            categories[entity.category] = categories.get(entity.category, 0) + 1
+        result["categories"] = categories
+        result["count"] = len(resp.entities)
+    except Exception as e:  # noqa: BLE001
+        log.warning("PII detection failed: %s", e)
         result["ok"] = False
         result["error"] = str(e)[:200]
     return result

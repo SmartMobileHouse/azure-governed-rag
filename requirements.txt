@@ -13,9 +13,14 @@ asgiref==3.12.1
     # via opentelemetry-instrumentation-asgi
 azure-ai-contentsafety==1.0.0
     # via azure-governed-rag
+azure-ai-textanalytics==5.4.0
+    # via azure-governed-rag
+azure-common==1.1.28
+    # via azure-ai-textanalytics
 azure-core==1.41.0
     # via
     #   azure-ai-contentsafety
+    #   azure-ai-textanalytics
     #   azure-core-tracing-opentelemetry
     #   azure-identity
     #   azure-monitor-opentelemetry
@@ -80,6 +85,7 @@ idna==3.18
 isodate==0.7.2
     # via
     #   azure-ai-contentsafety
+    #   azure-ai-textanalytics
     #   msrest
 jiter==0.16.0
     # via openai
@@ -285,6 +291,7 @@ tqdm==4.70.0
 typing-extensions==4.16.0
     # via
     #   anyio
+    #   azure-ai-textanalytics
     #   azure-core
     #   azure-identity
     #   fastapi
