@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # (fail-closed, strict). Positive detections always act regardless of this.
     safety_fail_closed: bool = False
 
+    # M3 human-in-the-loop approval gate
+    hitl_enabled: bool = True
+    # Comma-separated terms; if the question or answer contains one (case-
+    # insensitive), the turn requires human approval — in addition to low
+    # groundedness. A deterministic trigger for demos and sensitive topics.
+    hitl_sensitive_terms: str = ""
+    # Comma-separated approver allowlist (Easy Auth principal name). Empty = any
+    # authenticated caller may approve/reject.
+    hitl_approver_emails: str = ""
+
     # Seed the bundled sample corpus on startup if the store is empty, so a fresh
     # deploy has a working /chat out of the box. Set false to disable.
     seed_on_startup: bool = True

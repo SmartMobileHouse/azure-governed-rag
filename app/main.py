@@ -12,7 +12,7 @@ import contextlib
 import logging
 import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from . import smoke
@@ -87,5 +87,40 @@ def chat(req: ChatRequest) -> dict:
     from .rag import graph
 
     thread_id = req.thread_id or f"t-{uuid.uuid4().hex}"
-    result = graph.answer(req.message, thread_id)
-    return {"thread_id": thread_id, **result}
+    # Returns {status: complete, ...} or {status: pending_approval, ...} when the
+    # turn parks at the human approval gate. Response already carries thread_id.
+    return graph.answer(req.message, thread_id)
+
+
+def _approver(request: Request) -> str:
+    # Easy Auth injects the caller identity; fall back for local dev.
+    return request.headers.get("x-ms-client-principal-name") or "local-dev"
+
+
+def _authorized(approver: str) -> bool:
+    allow = [e.strip().lower() for e in settings.hitl_approver_emails.split(",") if e.strip()]
+    return not allow or approver.lower() in allow
+
+
+def _decide(thread_id: str, approved: bool, request: Request) -> dict:
+    from .rag import graph
+
+    approver = _approver(request)
+    if not _authorized(approver):
+        raise HTTPException(status_code=403, detail="not an authorized approver")
+    result = graph.resume(thread_id, approved=approved, approver=approver)
+    if result.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail="thread not found")
+    return result
+
+
+@app.post("/threads/{thread_id}/approve")
+def approve(thread_id: str, request: Request) -> dict:
+    """Release a parked answer. Idempotent; approver from Easy Auth identity."""
+    return _decide(thread_id, True, request)
+
+
+@app.post("/threads/{thread_id}/reject")
+def reject(thread_id: str, request: Request) -> dict:
+    """Withhold a parked answer. Idempotent; approver from Easy Auth identity."""
+    return _decide(thread_id, False, request)

@@ -24,6 +24,7 @@ from typing import Any, TypedDict
 
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from .. import db
 from ..config import settings
@@ -37,6 +38,9 @@ _UNGROUNDED_FALLBACK = (
     "I couldn't produce an answer fully supported by the available sources, so I'm "
     "declining to answer rather than speculate."
 )
+_REJECTED_MESSAGE = (
+    "This answer was withheld by a human reviewer and not released."
+)
 
 
 class RagState(TypedDict, total=False):
@@ -46,6 +50,7 @@ class RagState(TypedDict, total=False):
     blocked: bool
     block_reason: str
     grounded: bool
+    approved: bool
     governance: dict[str, Any]
 
 
@@ -99,23 +104,81 @@ def _generate(state: RagState) -> dict:
 
 
 def _check_groundedness(state: RagState) -> dict:
-    """LLM self-check; replace an unsupported answer with a safe fallback."""
+    """LLM self-check.
+
+    Without HITL this replaces an unsupported answer with a safe fallback (M2
+    behaviour). With HITL enabled it records the verdict but leaves the answer
+    intact — the approval gate hands that decision to a human.
+    """
     gov = dict(state.get("governance", {}))
-    if not (settings.safety_enabled and settings.groundedness_enabled):
+    grounded = True
+    if settings.safety_enabled and settings.groundedness_enabled:
+        ctxs = state.get("contexts", [])
+        context_block = "\n\n".join(f"[{c['doc_id']}:{c['ordinal']}] {c['content']}" for c in ctxs)
+        res = safety.check_groundedness(state.get("answer", ""), context_block)
+        grounded = res["grounded"]
+        gov["groundedness"] = {
+            "ok": res["ok"],
+            "grounded": res["grounded"],
+            "reason": res["reason"],
+            "error": res["error"],
+        }
+    else:
         gov["groundedness"] = {"status": "disabled"}
-        return {"grounded": True, "governance": gov}
-    ctxs = state.get("contexts", [])
-    context_block = "\n\n".join(f"[{c['doc_id']}:{c['ordinal']}] {c['content']}" for c in ctxs)
-    res = safety.check_groundedness(state.get("answer", ""), context_block)
-    gov["groundedness"] = {
-        "ok": res["ok"],
-        "grounded": res["grounded"],
-        "reason": res["reason"],
-        "error": res["error"],
-    }
-    out: dict = {"grounded": res["grounded"], "governance": gov}
-    if not res["grounded"] and (res["ok"] or settings.safety_fail_closed):
+
+    out: dict = {"grounded": grounded, "governance": gov}
+    check = gov["groundedness"]
+    if not settings.hitl_enabled and not grounded and (check.get("ok") or settings.safety_fail_closed):
         out["answer"] = _UNGROUNDED_FALLBACK
+    return out
+
+
+def _needs_approval(state: RagState) -> tuple[bool, str]:
+    """Decide whether a turn requires human sign-off, and why. Pure — safe to
+    call before ``interrupt`` (which re-executes the node head on resume)."""
+    reasons: list[str] = []
+    if not state.get("grounded", True):
+        reasons.append("low groundedness")
+    terms = [t.strip().lower() for t in settings.hitl_sensitive_terms.split(",") if t.strip()]
+    haystack = f"{state.get('question', '')} {state.get('answer', '')}".lower()
+    hits = [t for t in terms if t in haystack]
+    if hits:
+        reasons.append("sensitive terms: " + ", ".join(hits))
+    return bool(reasons), "; ".join(reasons)
+
+
+def _route_after_groundedness(state: RagState) -> str:
+    if not settings.hitl_enabled:
+        return "end"
+    needs, _ = _needs_approval(state)
+    return "approval_gate" if needs else "end"
+
+
+def _approval_gate(state: RagState) -> dict:
+    """Pause for human approval. ``interrupt`` is the FIRST side-effecting call,
+    so nothing before it re-runs on resume."""
+    _, reason = _needs_approval(state)
+    sources = [f"{c['doc_id']}:{c['ordinal']}" for c in state.get("contexts", [])]
+    decision = interrupt(
+        {
+            "reason": reason,
+            "question": state.get("question", ""),
+            "answer_preview": state.get("answer", ""),
+            "sources": sources,
+        }
+    )
+    approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
+    approver = decision.get("approver") if isinstance(decision, dict) else None
+    gov = dict(state.get("governance", {}))
+    gov["approval"] = {
+        "required": True,
+        "reason": reason,
+        "approved": approved,
+        "approver": approver,
+    }
+    out: dict = {"approved": approved, "governance": gov}
+    if not approved:
+        out["answer"] = _REJECTED_MESSAGE
     return out
 
 
@@ -126,6 +189,7 @@ def _builder() -> StateGraph:
     g.add_node("shield_chunks", _shield_chunks)
     g.add_node("generate", _generate)
     g.add_node("groundedness", _check_groundedness)
+    g.add_node("approval_gate", _approval_gate)
     g.add_edge(START, "guard_input")
     g.add_conditional_edges(
         "guard_input", _route_after_input, {"blocked": END, "retrieve": "retrieve"}
@@ -133,7 +197,10 @@ def _builder() -> StateGraph:
     g.add_edge("retrieve", "shield_chunks")
     g.add_edge("shield_chunks", "generate")
     g.add_edge("generate", "groundedness")
-    g.add_edge("groundedness", END)
+    g.add_conditional_edges(
+        "groundedness", _route_after_groundedness, {"approval_gate": "approval_gate", "end": END}
+    )
+    g.add_edge("approval_gate", END)
     return g
 
 
@@ -143,19 +210,52 @@ def setup_checkpointer() -> None:
         cp.setup()
 
 
+def _shape(result: dict, thread_id: str) -> dict:
+    """Map a graph result to the API response — pending (interrupted) or complete."""
+    interrupts = result.get("__interrupt__")
+    if interrupts:
+        payload = interrupts[0].value
+        return {"status": "pending_approval", "thread_id": thread_id, **payload}
+    contexts = result.get("contexts", [])
+    return {
+        "status": "complete",
+        "thread_id": thread_id,
+        "answer": result.get("answer", ""),
+        "sources": [f"{c['doc_id']}:{c['ordinal']}" for c in contexts],
+        "blocked": bool(result.get("blocked", False)),
+        "grounded": bool(result.get("grounded", True)),
+        "approved": result.get("approved"),
+        "governance": result.get("governance", {}),
+    }
+
+
 def answer(question: str, thread_id: str) -> dict:
-    """Run the graph for one turn, persisting state under thread_id."""
+    """Run the graph for one turn, persisting state under thread_id.
+
+    Returns a ``complete`` response, or ``pending_approval`` if the turn hit the
+    human approval gate (state is durably parked under thread_id until resumed).
+    """
     with PostgresSaver.from_conn_string(db.conn_string()) as cp:
         graph = _builder().compile(checkpointer=cp)
         result = graph.invoke(
             {"question": question},
             config={"configurable": {"thread_id": thread_id}},
         )
-    contexts = result.get("contexts", [])
-    return {
-        "answer": result.get("answer", ""),
-        "sources": [f"{c['doc_id']}:{c['ordinal']}" for c in contexts],
-        "blocked": bool(result.get("blocked", False)),
-        "grounded": bool(result.get("grounded", True)),
-        "governance": result.get("governance", {}),
-    }
+    return _shape(result, thread_id)
+
+
+def resume(thread_id: str, approved: bool, approver: str | None) -> dict:
+    """Resume a parked turn with a human decision. Idempotent: a thread that is
+    already resolved returns its final state without re-running."""
+    cfg = {"configurable": {"thread_id": thread_id}}
+    with PostgresSaver.from_conn_string(db.conn_string()) as cp:
+        graph = _builder().compile(checkpointer=cp)
+        snap = graph.get_state(cfg)
+        if not snap.values:
+            return {"status": "not_found", "thread_id": thread_id}
+        if not snap.next:  # nothing pending → already decided
+            return _shape(snap.values, thread_id)
+        result = graph.invoke(
+            Command(resume={"approved": approved, "approver": approver}), cfg
+        )
+    return _shape(result, thread_id)
