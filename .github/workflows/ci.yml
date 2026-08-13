@@ -1,7 +1,8 @@
 name: ci
 
-# Minimal build+lint+test from M0 (not M4) — this repo is published as an
-# authority artifact, so main should never be red. Eval gates are added in M4.
+# Lint + unit tests + M4 governance eval gate + image build. This repo is
+# published as an authority artifact, so main should never be red. The eval gate
+# is deterministic (Azure leaves stubbed) — see evals/README.md.
 on:
   push:
     branches: [main]
@@ -28,6 +29,9 @@ jobs:
 
       - name: Test
         run: uv run pytest -q
+
+      - name: Governance eval gate (deterministic, no cloud)
+        run: uv run pytest tests/test_governance_evals.py -q
 
       - name: Build image
         run: docker build -t azure-governed-rag:ci .
