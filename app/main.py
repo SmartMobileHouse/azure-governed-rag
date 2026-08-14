@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
+import time
 import uuid
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -22,21 +24,43 @@ from .config import settings
 log = logging.getLogger("app")
 
 
+def _configure_telemetry() -> None:
+    conn = os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING")
+    if not conn:
+        return
+    try:
+        from azure.monitor.opentelemetry import configure_azure_monitor
+
+        configure_azure_monitor(connection_string=conn)
+        log.info("Application Insights configured")
+    except Exception as e:  # noqa: BLE001
+        log.warning("telemetry setup skipped: %s", type(e).__name__)
+
+
+def _run_migrations() -> None:
+    """Migrate with bounded retry — a burstable/scale-from-zero DB can be briefly
+    unreachable at cold start, and skipping migrations silently 500s later."""
+    from . import threads
+    from .rag import audit, graph, store
+
+    for attempt in range(1, 6):
+        try:
+            store.init_schema()
+            graph.setup_checkpointer()
+            audit.init_schema()
+            threads.init_schema()
+            log.info("migrations applied (schema + checkpointer + audit + threads)")
+            return
+        except Exception as e:  # noqa: BLE001
+            log.warning("migration attempt %d failed: %s", attempt, type(e).__name__)
+            time.sleep(2)
+    log.error("migrations did not complete — /ready will report not ready")
+
+
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Best-effort migrations so the app is self-bootstrapping; never block startup
-    # on the DB (keeps /health up even if Postgres is briefly unreachable).
-    try:
-        from . import threads
-        from .rag import audit, graph, store
-
-        store.init_schema()
-        graph.setup_checkpointer()
-        audit.init_schema()
-        threads.init_schema()
-        log.info("migrations applied (schema + checkpointer + audit + threads)")
-    except Exception as e:  # noqa: BLE001
-        log.warning("startup migration skipped: %s", e)
+    _configure_telemetry()
+    _run_migrations()
 
     # Seed the bundled corpus so a fresh deploy has a working /chat. Best-effort
     # and only when the store is empty — never blocks startup, never clobbers data.
@@ -64,14 +88,24 @@ def health() -> dict:
 
 @app.get("/ready")
 def ready() -> dict:
-    """Readiness: configuration presence (M1 keeps this cheap; deep checks TODO)."""
+    """Readiness: configuration present AND the database actually reachable."""
     configured = {
         "azure_openai": bool(settings.azure_openai_endpoint),
         "content_safety": bool(settings.content_safety_endpoint),
         "language": bool(settings.language_endpoint),
         "postgres": bool(settings.postgres_host),
     }
-    return {"ready": all(configured.values()), "configured": configured}
+    database = False
+    if settings.postgres_host:
+        try:
+            from . import db
+
+            with db.connect() as conn, conn.cursor() as cur:
+                cur.execute("select 1")
+            database = True
+        except Exception:  # noqa: BLE001
+            database = False
+    return {"ready": all(configured.values()) and database, "configured": configured, "database": database}
 
 
 @app.get("/")

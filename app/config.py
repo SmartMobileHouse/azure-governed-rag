@@ -24,7 +24,11 @@ class Settings(BaseSettings):
     postgres_host: str = ""
     postgres_db: str = "appdb"
     postgres_user: str = ""
-    postgres_sslmode: str = "require"
+    # verify-full authenticates the server cert (a keyless Entra token is sent as
+    # the "password", so an unverified TLS peer could capture it). Local dev sets
+    # sslmode=disable. sslrootcert points at the container's CA bundle.
+    postgres_sslmode: str = "verify-full"
+    postgres_sslrootcert: str = "/etc/ssl/certs/ca-certificates.crt"
     # Local dev only (docker-compose). In Azure this stays empty and access is
     # via an Entra access token (keyless).
     postgres_password: str = ""

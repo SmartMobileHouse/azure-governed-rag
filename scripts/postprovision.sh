@@ -17,6 +17,14 @@ set -euo pipefail
 : "${SERVICE_WEB_NAME:?}"
 : "${APP_URL:?}"
 
+# These names are interpolated into SQL/identifiers below — validate them as
+# plain Postgres identifiers so a surprising env value can't change SQL meaning.
+for _v in POSTGRES_USER POSTGRES_DB POSTGRES_SERVER_NAME; do
+  case "${!_v}" in
+    *[!A-Za-z0-9_-]*|"") echo "  ! ${_v} is not a valid identifier: '${!_v}'"; exit 1;;
+  esac
+done
+
 echo "── postprovision: Postgres grant + pgvector + Easy Auth ──"
 
 # Locate psql. Homebrew's libpq is keg-only (unlinked) by default, so psql is
@@ -43,10 +51,18 @@ az postgres flexible-server microsoft-entra-admin create \
 echo "  Opening a temporary firewall rule for this machine (the hook runs locally)…"
 MY_IP="$(curl -fsS https://api.ipify.org 2>/dev/null || curl -fsS https://ifconfig.me 2>/dev/null || true)"
 [ -n "${MY_IP}" ] || { echo "  ! could not determine this machine's public IP"; exit 1; }
+RULE_NAME="postprovision-$$"
+cleanup_firewall() {
+  az postgres flexible-server firewall-rule delete \
+    --resource-group "${AZURE_RESOURCE_GROUP}" --server-name "${POSTGRES_SERVER_NAME}" \
+    --name "${RULE_NAME}" --yes >/dev/null 2>&1 || true
+}
 az postgres flexible-server firewall-rule create \
   --resource-group "${AZURE_RESOURCE_GROUP}" --server-name "${POSTGRES_SERVER_NAME}" \
-  --name postprovision-client \
+  --name "${RULE_NAME}" \
   --start-ip-address "${MY_IP}" --end-ip-address "${MY_IP}" >/dev/null
+# Remove the temp rule on ANY exit — success or failure — so it never lingers.
+trap cleanup_firewall EXIT
 
 echo "  Granting managed-identity role '${POSTGRES_USER}' and enabling pgvector…"
 PGPASSWORD="$(az account get-access-token \
@@ -72,15 +88,15 @@ GRANT ALL ON SCHEMA public TO "${POSTGRES_USER}";
 CREATE EXTENSION IF NOT EXISTS vector;
 SQL
 
-# Runtime app→Postgres uses the Azure-services rule; drop this machine's temp rule.
-az postgres flexible-server firewall-rule delete \
-  --resource-group "${AZURE_RESOURCE_GROUP}" --server-name "${POSTGRES_SERVER_NAME}" \
-  --name postprovision-client --yes >/dev/null 2>&1 || true
+# Runtime app→Postgres uses the Azure-services rule; the deployer's temp rule is
+# removed by the EXIT trap (cleanup_firewall) whether or not later steps succeed.
 
 # ── 2. Easy Auth (Entra) on the Container App ────────────────────────────────
 FQDN="${APP_URL#https://}"
 APP_DISPLAY="agr-${AZURE_ENV_NAME}"
-APP_ID="$(az ad app list --display-name "${APP_DISPLAY}" --query '[0].appId' -o tsv)"
+# Exact-match the display name (not a prefix/substring) so a look-alike app
+# registration can't be selected as the trusted Easy Auth client.
+APP_ID="$(az ad app list --filter "displayName eq '${APP_DISPLAY}'" --query '[0].appId' -o tsv)"
 if [ -z "${APP_ID}" ] || [ "${APP_ID}" = "null" ]; then
   echo "  Creating app registration ${APP_DISPLAY}…"
   APP_ID="$(az ad app create --display-name "${APP_DISPLAY}" \

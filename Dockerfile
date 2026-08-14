@@ -7,6 +7,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /code
 
+# ca-certificates provides the CA bundle used for Postgres sslmode=verify-full.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install with pip (not the uv binary): Container Apps needs linux/amd64, so on
 # Apple Silicon the image builds under QEMU emulation — where the uv Rust binary
 # segfaults but pip (pure Python) works. requirements.txt is generated from the
@@ -17,6 +22,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 # Bundled sample corpus — seeded into pgvector on first startup (see main.lifespan)
 COPY docs/sample-corpus ./docs/sample-corpus
+
+# Run as an unprivileged user.
+RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /code
+USER appuser
 
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

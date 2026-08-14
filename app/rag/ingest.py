@@ -18,6 +18,8 @@ _SKIP = {"readme.md"}  # corpus notes, not content
 
 
 def chunk_text(text: str, size: int = 800, overlap: int = 100) -> list[str]:
+    if size <= 0 or not (0 <= overlap < size):
+        raise ValueError("chunk_text needs size > 0 and 0 <= overlap < size")
     text = text.strip()
     if len(text) <= size:
         return [text] if text else []
