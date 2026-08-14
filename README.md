@@ -97,13 +97,23 @@ when a check itself is unavailable (default: fail-open + flag).
 
 ## API
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /chat` | `{message, thread_id?}` → `{status, thread_id, answer, sources, blocked, grounded, governance}` — or `{status:"pending_approval", reason, answer_preview}` when parked |
-| `POST /threads/{id}/approve` · `/reject` | resume a parked turn (idempotent; approver from the Entra identity) |
-| `GET /threads/{id}/audit` | the turn's privacy-safe decision trail |
-| `GET /smoke` | proves the keyless chain end to end (chat, embedding, Content Safety, pgvector) |
-| `GET /health` · `/ready` | liveness · dependency readiness |
+All endpoints require a validated Entra identity (Easy Auth). The server mints
+every `thread_id` and binds it to the caller.
+
+| Endpoint | Who | Purpose |
+|---|---|---|
+| `POST /chat` | caller | `{message}` → `{status, thread_id, answer, sources, blocked, grounded, governance}`. A parked turn returns **only** `{status:"pending_approval", thread_id, reason}` — no answer. |
+| `GET /threads/{id}` | **owner** | Status/result; returns the answer once the turn is approved (or the withheld message if rejected). |
+| `GET /threads/{id}/pending` | **reviewer** | The question + answer of a parked turn, for an authorized reviewer to judge. |
+| `POST /threads/{id}/approve` · `/reject` | **reviewer** | Release / withhold a parked answer. Never the requester (no self-approval); atomic; idempotent. |
+| `GET /threads/{id}/audit` | owner or reviewer | The turn's privacy-safe decision trail. |
+| `GET /smoke` | caller | Proves the keyless chain end to end (chat, embedding, Content Safety, pgvector). |
+| `GET /health` · `/ready` | open | Liveness · dependency + database readiness. |
+
+**Human-in-the-loop flow:** a flagged turn parks and the requester gets a
+*reason only*. An authorized reviewer (`HITL_APPROVER_EMAILS`, never the
+requester) reads `/pending`, then `/approve` or `/reject`. The requester polls
+`GET /threads/{id}` and receives the answer only once it's approved.
 
 ## Deploy
 
@@ -185,10 +195,28 @@ Governance is tunable via environment variables (see `app/config.py`):
 | `SAFETY_ENABLED` | `true` | Prompt Shields on input + chunks |
 | `GROUNDEDNESS_ENABLED` | `true` | answer groundedness self-check |
 | `PII_ENABLED` / `PII_CATEGORIES` | `true` / sensitive set | mask PII; the allowlist excludes noisy types (PersonType, Organization) |
+| `PII_FAIL_CLOSED` | `true` | withhold the answer if the PII check can't run |
 | `HITL_ENABLED` | `true` | human approval gate |
+| `HITL_APPROVER_EMAILS` | `""` | reviewer allowlist — **empty authorizes no one** (set it to use the gate) |
 | `HITL_SENSITIVE_TERMS` | `""` | terms that route a turn to approval |
 | `HITL_ON_PII` | `false` | also route PII-containing answers to approval |
-| `SAFETY_FAIL_CLOSED` | `false` | block/withhold when a check itself errors |
+| `SAFETY_FAIL_CLOSED` | `false` | block/withhold when a safety check itself errors |
+| `AUDIT_HASH_KEY` | `""` | HMAC key (Key Vault secret) for audit/ownership pseudonyms; unset = unsalted SHA-256 (dev) |
+
+## Data handling & retention
+
+- **Audit log** (`audit_log`) contains **no raw content or identity** — prompts
+  and answers are keyed hashes, actor/approver are HMAC pseudonyms, sources are
+  hashed, and governance is reduced to structural codes/counts.
+- **Operational state is different.** The LangGraph **checkpointer** tables store
+  each turn's **raw** question, retrieved chunks, and (pre-redaction) answer — this
+  is what makes pause/resume work — in the *same* PostgreSQL server, with **no TTL
+  by default**. A database reader or backup therefore sees raw content. If you run
+  this on sensitive data, add a retention/cleanup job for the checkpoint tables and
+  consider moving the audit log to a separate, access-controlled store. See
+  [`docs/adr/0007-checkpoint-retention.md`](docs/adr/0007-checkpoint-retention.md).
+- **TLS:** Postgres uses `sslmode=verify-full` in the container (the keyless Entra
+  token is the connection credential). Local dev uses `sslmode=disable`.
 
 ## Evals & CI
 

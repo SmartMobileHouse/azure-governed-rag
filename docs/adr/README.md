@@ -12,5 +12,8 @@ context, the decision, and the trade-off we accepted.
 | [0004](0004-langgraph-for-governance.md) | Governance as LangGraph nodes; HITL via `interrupt` |
 | [0005](0005-non-streaming-responses.md) | Non-streaming responses |
 | [0006](0006-single-region.md) | Single region (`swedencentral`) |
+| [0007](0007-checkpoint-retention.md) | Checkpoint retention boundary (raw content lives in checkpoints) |
+| [0008](0008-hitl-requester-reviewer-split.md) | HITL requester/reviewer split |
+| [0009](0009-postgres-network-exposure.md) | Postgres network exposure (v1 tradeoff) |
 
 Format: Context · Decision · Consequences. Status is `Accepted` unless noted.

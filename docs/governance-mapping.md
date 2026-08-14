@@ -42,7 +42,10 @@ NIST AI RMF, the EU AI Act, and ISO/IEC 42001.
 - A DPIA, GDPR lawful-basis analysis, or data-subject-rights handling
 - Bias / fairness testing, or evaluation of the model on *your* data and tasks
 - An incident-response process, model-monitoring/drift program, or SLAs
-- A data retention, minimisation, or deletion policy
+- A data retention / minimisation / deletion policy. Note: the audit log is
+  privacy-safe (hashes only), but the LangGraph **checkpoint** tables persist raw
+  prompts, retrieved chunks, and answers with **no TTL** by default — see
+  [`adr/0007-checkpoint-retention.md`](adr/0007-checkpoint-retention.md)
 - Conformity assessment, CE marking, certification, or any legal attestation
 
 ## Customer obligations (non-exhaustive)
