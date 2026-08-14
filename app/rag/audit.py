@@ -1,25 +1,24 @@
-"""Privacy-safe audit trail (M3 slice 2).
+"""Privacy-safe audit trail.
 
 One row per turn transition (answered / blocked / pending / approved / rejected)
 in a dedicated ``audit_log`` table — a separate store from the operational rag /
 checkpoint tables. It records *what was decided*, never raw content or identity:
 
-* prompt and answer are stored as sha256 hashes + lengths, never plaintext
-* the actor and approver are pseudonymous hashes (no email/UPN stored)
-* sources (doc ids) and safety verdicts are safe structural metadata
+* prompt and answer are stored as keyed hashes + lengths, never plaintext
+* actor and approver are pseudonymous (HMAC) hashes — no email/UPN
+* sources are hashed (a corpus filename can itself be PII)
+* the persisted governance object is rebuilt from a strict allowlist of
+  structural fields — booleans, counts, PII categories, and reason *codes*; every
+  free-text field (grounding reasons, error messages, matched terms) is dropped
 * policy / prompt / model version stamps make a decision reproducible
-* a checkpoint id correlates the event to the exact LangGraph state
 
-Best-effort: a failed write is logged and never breaks a turn. The actor hash is
-a plain sha256 (deterministic pseudonym) — a keyed HMAC with a Key Vault secret
-would be stronger and is the documented hardening path.
+Best-effort: a failed write is logged and never breaks a turn. Hashing uses
+HMAC-SHA256 keyed by ``AUDIT_HASH_KEY`` when set (see app/hashing.py).
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import re
 import uuid
 from typing import Any
 
@@ -27,6 +26,7 @@ from psycopg.types.json import Jsonb
 
 from .. import db
 from ..config import settings
+from ..hashing import content_hash, pseudonym
 from ..versions import POLICY_VERSION, PROMPT_VERSION
 
 log = logging.getLogger("app.audit")
@@ -64,40 +64,69 @@ def init_schema() -> None:
         cur.execute(_SCHEMA)
 
 
-def _hash(text: str | None) -> str | None:
-    if not text:
-        return None
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+def _reason_codes(reason: str | None) -> list[str]:
+    """Map a human approval reason to structural codes (no free text persisted)."""
+    r = (reason or "").lower()
+    codes = []
+    if "low groundedness" in r:
+        codes.append("low_groundedness")
+    if "pii" in r:
+        codes.append("pii")
+    if "sensitive terms" in r:
+        codes.append("sensitive_terms")
+    return codes
 
 
-_SENSITIVE_TERMS_RE = re.compile(r"sensitive terms: ([^;]+)")
+def _drop_none(d: dict) -> dict:
+    return {k: v for k, v in d.items() if v is not None}
 
 
-def _redact_reason(reason: str | None) -> str | None:
-    """Replace matched sensitive-term literals (derived from the question) with
-    just their count, so no question-derived text is persisted in the audit."""
-    if not reason:
-        return reason
+def _safe_governance(gov: dict | None) -> dict:
+    """Rebuild governance from a strict allowlist — structural fields only.
 
-    def _count(m: re.Match) -> str:
-        n = len([t for t in m.group(1).split(",") if t.strip()])
-        return f"sensitive terms matched ({n})"
-
-    return _SENSITIVE_TERMS_RE.sub(_count, reason)
-
-
-def _redact_governance(gov: dict | None) -> dict:
-    """Copy the governance verdicts, stripping anything derived from raw input:
-    the approver email becomes a hash and matched sensitive terms become a count."""
+    Nothing derived from the prompt, answer, retrieved text, PII values, or an
+    error message is copied; free-text reasons become codes and identities become
+    hashes. This is an allowlist by construction: unknown keys are never persisted.
+    """
     if not gov:
         return {}
-    out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in gov.items()}
-    approval = out.get("approval")
-    if isinstance(approval, dict):
-        if approval.get("approver"):
-            approval["approver_hash"] = _hash(approval.pop("approver"))
-        if approval.get("reason"):
-            approval["reason"] = _redact_reason(approval["reason"])
+    out: dict[str, Any] = {}
+
+    ins = gov.get("input_shield")
+    if isinstance(ins, dict):
+        out["input_shield"] = _drop_none(
+            {"ok": ins.get("ok"), "attack": ins.get("attack"), "status": ins.get("status")}
+        )
+
+    cs = gov.get("chunk_shield")
+    if isinstance(cs, dict):
+        quarantined = cs.get("quarantined")
+        out["chunk_shield"] = _drop_none(
+            {"ok": cs.get("ok"),
+             "quarantined_count": len(quarantined) if isinstance(quarantined, list) else None,
+             "status": cs.get("status")}
+        )
+
+    gr = gov.get("groundedness")
+    if isinstance(gr, dict):
+        out["groundedness"] = _drop_none(
+            {"ok": gr.get("ok"), "grounded": gr.get("grounded"), "status": gr.get("status")}
+        )
+
+    pii = gov.get("pii")
+    if isinstance(pii, dict):
+        out["pii"] = _drop_none(
+            {"ok": pii.get("ok"), "count": pii.get("count"),
+             "categories": pii.get("categories"), "status": pii.get("status")}
+        )
+
+    ap = gov.get("approval")
+    if isinstance(ap, dict):
+        out["approval"] = _drop_none(
+            {"required": ap.get("required"), "approved": ap.get("approved"),
+             "approver_hash": pseudonym(ap.get("approver"), "approver"),
+             "reason_codes": _reason_codes(ap.get("reason")) or None}
+        )
     return out
 
 
@@ -125,13 +154,13 @@ def record(
                     str(uuid.uuid4()),
                     thread_id,
                     decision,
-                    _hash(actor),
-                    _hash(question),
+                    pseudonym(actor, "actor"),
+                    content_hash(question),
                     len(question) if question else None,
-                    _hash(answer),
+                    content_hash(answer),
                     len(answer) if answer else None,
-                    Jsonb(sources or []),
-                    Jsonb(_redact_governance(governance)),
+                    Jsonb([pseudonym(s, "source") for s in (sources or [])]),
+                    Jsonb(_safe_governance(governance)),
                     checkpoint_id,
                     POLICY_VERSION,
                     PROMPT_VERSION,
@@ -139,7 +168,7 @@ def record(
                 ),
             )
     except Exception as e:  # noqa: BLE001 - audit is best-effort
-        log.warning("audit write skipped (thread=%s decision=%s): %s", thread_id, decision, e)
+        log.warning("audit write skipped (thread=%s decision=%s): %s", thread_id, decision, type(e).__name__)
 
 
 def for_thread(thread_id: str) -> list[dict[str, Any]]:
@@ -153,7 +182,7 @@ def for_thread(thread_id: str) -> list[dict[str, Any]]:
             )
             rows = cur.fetchall()
     except Exception as e:  # noqa: BLE001
-        log.warning("audit read failed (thread=%s): %s", thread_id, e)
+        log.warning("audit read failed (thread=%s): %s", thread_id, type(e).__name__)
         return []
     events = []
     for r in rows:

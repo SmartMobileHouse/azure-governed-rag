@@ -8,5 +8,5 @@ The model is stamped separately from settings (already a Bicep param).
 
 from __future__ import annotations
 
-POLICY_VERSION = "m3-slice2"
+POLICY_VERSION = "hardening-2026-08-14"
 PROMPT_VERSION = "2026-08-12"
