@@ -26,7 +26,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from .. import db
+from .. import db, threads
 from ..config import settings
 from . import audit, llm, safety, store
 
@@ -189,15 +189,10 @@ def _approval_gate(state: RagState) -> dict:
     """Pause for human approval. ``interrupt`` is the FIRST side-effecting call,
     so nothing before it re-runs on resume."""
     _, reason = _needs_approval(state)
-    sources = [f"{c['doc_id']}:{c['ordinal']}" for c in state.get("contexts", [])]
-    decision = interrupt(
-        {
-            "reason": reason,
-            "question": state.get("question", ""),
-            "answer_preview": state.get("answer", ""),
-            "sources": sources,
-        }
-    )
+    # Only the reason is surfaced to the requester (via _shape). The question,
+    # answer and sources stay in the checkpoint and are shown ONLY to an
+    # authorized reviewer via graph.review_material / the /pending endpoint.
+    decision = interrupt({"reason": reason})
     approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
     approver = decision.get("approver") if isinstance(decision, dict) else None
     gov = dict(state.get("governance", {}))
@@ -243,18 +238,24 @@ def setup_checkpointer() -> None:
         cp.setup()
 
 
+def _sources(state: dict) -> list[str]:
+    return [f"{c['doc_id']}:{c['ordinal']}" for c in state.get("contexts", [])]
+
+
 def _shape(result: dict, thread_id: str) -> dict:
-    """Map a graph result to the API response — pending (interrupted) or complete."""
-    interrupts = result.get("__interrupt__")
-    if interrupts:
-        payload = interrupts[0].value
-        return {"status": "pending_approval", "thread_id": thread_id, **payload}
-    contexts = result.get("contexts", [])
+    """Map a graph result to the REQUESTER-facing response.
+
+    A parked turn returns only the reason — never the question, answer or sources.
+    Those live in the checkpoint and are shown solely to an authorized reviewer.
+    """
+    if result.get("__interrupt__"):
+        reason = result["__interrupt__"][0].value.get("reason", "")
+        return {"status": "pending_approval", "thread_id": thread_id, "reason": reason}
     return {
         "status": "complete",
         "thread_id": thread_id,
         "answer": result.get("answer", ""),
-        "sources": [f"{c['doc_id']}:{c['ordinal']}" for c in contexts],
+        "sources": _sources(result),
         "blocked": bool(result.get("blocked", False)),
         "grounded": bool(result.get("grounded", True)),
         "approved": result.get("approved"),
@@ -264,29 +265,21 @@ def _shape(result: dict, thread_id: str) -> dict:
 
 def _audit(result: dict, thread_id: str, actor: str | None, checkpoint_id: str | None) -> None:
     """Record one privacy-safe audit event for the transition just made."""
-    interrupts = result.get("__interrupt__")
-    if interrupts:
-        payload = interrupts[0].value
-        audit.record(
-            thread_id=thread_id, decision="pending", actor=actor,
-            question=payload.get("question"), answer=payload.get("answer_preview"),
-            sources=payload.get("sources"), governance=result.get("governance"),
-            checkpoint_id=checkpoint_id,
+    if result.get("__interrupt__"):
+        decision = "pending"
+    else:
+        approved = result.get("approved")
+        decision = (
+            "blocked" if result.get("blocked")
+            else "approved" if approved is True
+            else "rejected" if approved is False
+            else "answered"
         )
-        return
-    approved = result.get("approved")
-    decision = (
-        "blocked" if result.get("blocked")
-        else "approved" if approved is True
-        else "rejected" if approved is False
-        else "answered"
-    )
-    contexts = result.get("contexts", [])
     audit.record(
         thread_id=thread_id, decision=decision, actor=actor,
         question=result.get("question"), answer=result.get("answer"),
-        sources=[f"{c['doc_id']}:{c['ordinal']}" for c in contexts],
-        governance=result.get("governance"), checkpoint_id=checkpoint_id,
+        sources=_sources(result), governance=result.get("governance"),
+        checkpoint_id=checkpoint_id,
     )
 
 
@@ -297,9 +290,11 @@ def _checkpoint_id(graph, cfg: dict) -> str | None:
 def answer(question: str, thread_id: str, actor: str | None = None) -> dict:
     """Run the graph for one turn, persisting state under thread_id.
 
-    Returns a ``complete`` response, or ``pending_approval`` if the turn hit the
-    human approval gate (state is durably parked under thread_id until resumed).
+    Records thread ownership (so only the caller can later read status/audit) and
+    returns a ``complete`` response, or ``pending_approval`` (reason only) if the
+    turn parked at the human approval gate.
     """
+    threads.create(thread_id, actor)
     cfg = {"configurable": {"thread_id": thread_id}}
     with PostgresSaver.from_conn_string(db.conn_string()) as cp:
         graph = _builder().compile(checkpointer=cp)
@@ -309,16 +304,50 @@ def answer(question: str, thread_id: str, actor: str | None = None) -> dict:
     return _shape(result, thread_id)
 
 
+def review_material(thread_id: str) -> dict | None:
+    """Reviewer-only view of a PARKED turn: the question, answer and sources to
+    judge. Returns None if the thread isn't currently awaiting approval."""
+    cfg = {"configurable": {"thread_id": thread_id}}
+    with PostgresSaver.from_conn_string(db.conn_string()) as cp:
+        graph = _builder().compile(checkpointer=cp)
+        snap = graph.get_state(cfg)
+    if not snap.values or not snap.next:
+        return None
+    values = snap.values
+    return {
+        "reason": _needs_approval(values)[1],
+        "question": values.get("question", ""),
+        "answer": values.get("answer", ""),
+        "sources": _sources(values),
+    }
+
+
+def status(thread_id: str) -> dict | None:
+    """Owner-facing status/result. Returns the answer only once the turn is
+    resolved (auto-completed or approved); a rejected turn returns the withheld
+    message. None if the thread has no state."""
+    cfg = {"configurable": {"thread_id": thread_id}}
+    with PostgresSaver.from_conn_string(db.conn_string()) as cp:
+        graph = _builder().compile(checkpointer=cp)
+        snap = graph.get_state(cfg)
+    if not snap.values:
+        return None
+    if snap.next:
+        return {"status": "pending_approval", "thread_id": thread_id,
+                "reason": _needs_approval(snap.values)[1]}
+    return _shape(snap.values, thread_id)
+
+
 def resume(thread_id: str, approved: bool, approver: str | None) -> dict:
-    """Resume a parked turn with a human decision. Idempotent: a thread that is
-    already resolved returns its final state without re-running (or re-auditing)."""
+    """Resume a parked turn with a human decision, then audit it. Callers gate
+    this behind an atomic decision (threads.try_decide) so it runs at most once."""
     cfg = {"configurable": {"thread_id": thread_id}}
     with PostgresSaver.from_conn_string(db.conn_string()) as cp:
         graph = _builder().compile(checkpointer=cp)
         snap = graph.get_state(cfg)
         if not snap.values:
             return {"status": "not_found", "thread_id": thread_id}
-        if not snap.next:  # nothing pending → already decided
+        if not snap.next:  # nothing pending → already resolved
             return _shape(snap.values, thread_id)
         result = graph.invoke(
             Command(resume={"approved": approved, "approver": approver}), cfg

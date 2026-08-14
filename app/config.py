@@ -64,9 +64,13 @@ class Settings(BaseSettings):
     # insensitive), the turn requires human approval — in addition to low
     # groundedness. A deterministic trigger for demos and sensitive topics.
     hitl_sensitive_terms: str = ""
-    # Comma-separated approver allowlist (Easy Auth principal name). Empty = any
-    # authenticated caller may approve/reject.
+    # Comma-separated approver allowlist (Easy Auth principal name). EMPTY = NO
+    # ONE may approve/reject (fail-closed) — reviewers must be set explicitly, and
+    # a requester can never approve their own turn.
     hitl_approver_emails: str = ""
+    # HMAC key for audit pseudonyms + thread ownership. Set from a Key Vault
+    # secret in production; unset falls back to unsalted SHA-256 (dev only).
+    audit_hash_key: str = ""
 
     # Seed the bundled sample corpus on startup if the store is empty, so a fresh
     # deploy has a working /chat out of the box. Set false to disable.

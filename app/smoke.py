@@ -8,9 +8,10 @@ end-to-end proof rather than "ARM deployed a hello app". Protected by Easy Auth.
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from . import db
+from .auth import require_principal
 from .azure_clients import content_safety_client, openai_client
 from .config import settings
 
@@ -64,7 +65,7 @@ def _check_postgres() -> dict:
 
 
 @router.get("/smoke")
-def smoke() -> dict:
+def smoke(principal: str = Depends(require_principal)) -> dict:
     checks = {
         "chat": _check_chat(),
         "embedding": _check_embedding(),

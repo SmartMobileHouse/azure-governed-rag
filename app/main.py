@@ -12,10 +12,11 @@ import contextlib
 import logging
 import uuid
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from . import smoke
+from .auth import is_approver, require_principal
 from .config import settings
 
 log = logging.getLogger("app")
@@ -26,12 +27,14 @@ async def lifespan(_: FastAPI):
     # Best-effort migrations so the app is self-bootstrapping; never block startup
     # on the DB (keeps /health up even if Postgres is briefly unreachable).
     try:
+        from . import threads
         from .rag import audit, graph, store
 
         store.init_schema()
         graph.setup_checkpointer()
         audit.init_schema()
-        log.info("migrations applied (schema + checkpointer + audit)")
+        threads.init_schema()
+        log.info("migrations applied (schema + checkpointer + audit + threads)")
     except Exception as e:  # noqa: BLE001
         log.warning("startup migration skipped: %s", e)
 
@@ -78,58 +81,90 @@ def root() -> dict:
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
-    # Server issues opaque thread ids; a client may pass one back to continue a
-    # conversation. (Binding threads to the authenticated caller is an M1 TODO.)
-    thread_id: str | None = None
-
-
-def _principal(request: Request) -> str:
-    # Easy Auth injects the caller identity; fall back for local dev.
-    return request.headers.get("x-ms-client-principal-name") or "local-dev"
 
 
 @app.post("/chat")
-def chat(req: ChatRequest, request: Request) -> dict:
+def chat(req: ChatRequest, principal: str = Depends(require_principal)) -> dict:
+    """Start a turn. The server mints the thread id and binds it to the caller.
+
+    A parked turn returns only ``{status: pending_approval, thread_id, reason}`` —
+    poll GET /threads/{id} for the answer once a reviewer approves.
+    """
     from .rag import graph
 
-    thread_id = req.thread_id or f"t-{uuid.uuid4().hex}"
-    # Returns {status: complete, ...} or {status: pending_approval, ...} when the
-    # turn parks at the human approval gate. Response already carries thread_id.
-    return graph.answer(req.message, thread_id, actor=_principal(request))
+    thread_id = f"t-{uuid.uuid4().hex}"
+    return graph.answer(req.message, thread_id, actor=principal)
 
 
-def _authorized(approver: str) -> bool:
-    allow = [e.strip().lower() for e in settings.hitl_approver_emails.split(",") if e.strip()]
-    return not allow or approver.lower() in allow
+def _own_or_404(thread_id: str, principal: str) -> None:
+    from . import threads
 
-
-def _decide(thread_id: str, approved: bool, request: Request) -> dict:
-    from .rag import graph
-
-    approver = _principal(request)
-    if not _authorized(approver):
-        raise HTTPException(status_code=403, detail="not an authorized approver")
-    result = graph.resume(thread_id, approved=approved, approver=approver)
-    if result.get("status") == "not_found":
+    if not threads.is_owner(thread_id, principal):
+        # 404 (not 403) so a non-owner can't confirm a thread id exists.
         raise HTTPException(status_code=404, detail="thread not found")
-    return result
+
+
+@app.get("/threads/{thread_id}")
+def thread_status(thread_id: str, principal: str = Depends(require_principal)) -> dict:
+    """Owner-only status/result. Returns the answer once the turn is resolved."""
+    from .rag import graph
+
+    _own_or_404(thread_id, principal)
+    st = graph.status(thread_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="thread not found")
+    return st
+
+
+@app.get("/threads/{thread_id}/pending")
+def thread_pending(thread_id: str, principal: str = Depends(require_principal)) -> dict:
+    """Reviewer-only view of a parked turn — the question + answer to judge."""
+    from .rag import graph
+
+    if not is_approver(principal):
+        raise HTTPException(status_code=403, detail="not an authorized reviewer")
+    review = graph.review_material(thread_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail="no turn awaiting review")
+    return {"thread_id": thread_id, **review}
+
+
+def _decide(thread_id: str, approved: bool, principal: str) -> dict:
+    from . import threads
+    from .rag import graph
+
+    if not is_approver(principal):
+        raise HTTPException(status_code=403, detail="not an authorized reviewer")
+    if not threads.exists(thread_id):
+        raise HTTPException(status_code=404, detail="thread not found")
+    if threads.is_owner(thread_id, principal):
+        raise HTTPException(status_code=403, detail="a requester cannot approve their own turn")
+    decision = "approved" if approved else "rejected"
+    if not threads.try_decide(thread_id, decision):
+        # Already decided by a concurrent/earlier call — idempotent.
+        return {"status": "already_decided", "thread_id": thread_id,
+                "decision": threads.decision(thread_id)}
+    return graph.resume(thread_id, approved=approved, approver=principal)
 
 
 @app.post("/threads/{thread_id}/approve")
-def approve(thread_id: str, request: Request) -> dict:
-    """Release a parked answer. Idempotent; approver from Easy Auth identity."""
-    return _decide(thread_id, True, request)
+def approve(thread_id: str, principal: str = Depends(require_principal)) -> dict:
+    """Release a parked answer. Reviewer-only; never the requester; atomic."""
+    return _decide(thread_id, True, principal)
 
 
 @app.post("/threads/{thread_id}/reject")
-def reject(thread_id: str, request: Request) -> dict:
-    """Withhold a parked answer. Idempotent; approver from Easy Auth identity."""
-    return _decide(thread_id, False, request)
+def reject(thread_id: str, principal: str = Depends(require_principal)) -> dict:
+    """Withhold a parked answer. Reviewer-only; never the requester; atomic."""
+    return _decide(thread_id, False, principal)
 
 
 @app.get("/threads/{thread_id}/audit")
-def thread_audit(thread_id: str) -> dict:
-    """The turn's decision trail — hashed excerpts, pseudonymous actor, versions."""
+def thread_audit(thread_id: str, principal: str = Depends(require_principal)) -> dict:
+    """The turn's decision trail — owner or an authorized reviewer only."""
+    from . import threads
     from .rag import audit
 
+    if not (threads.is_owner(thread_id, principal) or is_approver(principal)):
+        raise HTTPException(status_code=404, detail="thread not found")
     return {"thread_id": thread_id, "events": audit.for_thread(thread_id)}
