@@ -55,6 +55,10 @@ class Settings(BaseSettings):
         "Person,Email,PhoneNumber,Address,CreditCardNumber,USSocialSecurityNumber,"
         "InternationalBankingAccountNumber,ABARoutingNumber,SWIFTCode,IPAddress"
     )
+    # PII protection fails CLOSED by default: if the check can't run, the answer
+    # is withheld rather than returned unredacted. Set false only with an explicit
+    # risk acceptance (availability over privacy).
+    pii_fail_closed: bool = True
 
     # M3 human-in-the-loop approval gate
     hitl_enabled: bool = True

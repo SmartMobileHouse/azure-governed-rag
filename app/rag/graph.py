@@ -41,6 +41,9 @@ _UNGROUNDED_FALLBACK = (
 _REJECTED_MESSAGE = (
     "This answer was withheld by a human reviewer and not released."
 )
+_PII_WITHHELD = (
+    "This answer was withheld because personal-data screening could not run."
+)
 
 
 class RagState(TypedDict, total=False):
@@ -117,10 +120,12 @@ def _check_groundedness(state: RagState) -> dict:
         ctxs = state.get("contexts", [])
         context_block = "\n\n".join(f"[{c['doc_id']}:{c['ordinal']}] {c['content']}" for c in ctxs)
         res = safety.check_groundedness(state.get("answer", ""), context_block)
-        grounded = res["grounded"]
+        # Fail CLOSED when the check itself errored: treat as ungrounded so the
+        # answer is withheld (no HITL) or parked (HITL) instead of released.
+        grounded = res["grounded"] if res["ok"] else (not settings.safety_fail_closed)
         gov["groundedness"] = {
             "ok": res["ok"],
-            "grounded": res["grounded"],
+            "grounded": grounded,
             "reason": res["reason"],
             "error": res["error"],
         }
@@ -154,11 +159,16 @@ def _redact_pii(state: RagState) -> dict:
         "error": res["error"],
     }
     out: dict = {"governance": gov}
-    if res["ok"] and res["count"] > 0:
-        out["answer"] = res["redacted"]  # mask the PII in the returned answer
+    if res["ok"]:
+        if res["count"] > 0:
+            out["answer"] = res["redacted"]  # mask the PII in the returned answer
+            out["pii_found"] = True
+    else:
+        # The PII check failed. Flag it so HITL_ON_PII can still route the turn,
+        # and fail CLOSED by default — withhold rather than return unredacted text.
         out["pii_found"] = True
-    elif not res["ok"] and settings.safety_fail_closed:
-        out["answer"] = "[answer withheld: PII check unavailable]"
+        if settings.pii_fail_closed:
+            out["answer"] = _PII_WITHHELD
     return out
 
 

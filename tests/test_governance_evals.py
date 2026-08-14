@@ -24,6 +24,9 @@ CRITICAL_KINDS = {
     "sensitive_term",
     "hitl_approve",
     "hitl_reject",
+    "ground_fail_closed",
+    "pii_fail_closed",
+    "shield_fail_closed",
 }
 
 

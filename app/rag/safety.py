@@ -64,17 +64,23 @@ def shield_prompt(user_prompt: str, documents: list[str]) -> dict:
         )
         resp.raise_for_status()
         data = resp.json()
-        result["user_attack"] = bool(
-            data.get("userPromptAnalysis", {}).get("attackDetected", False)
-        )
-        result["document_attacks"] = [
-            bool(d.get("attackDetected", False))
-            for d in data.get("documentsAnalysis", [])
-        ]
+        user_analysis = data.get("userPromptAnalysis")
+        doc_analysis = data.get("documentsAnalysis")
+        # Strict: require the expected shape and exactly one analysis per document.
+        # A partial/malformed response is treated as a failed check (ok=False), so
+        # the fail-closed policy quarantines rather than trusting missing results.
+        if user_analysis is None or doc_analysis is None or len(doc_analysis) != len(documents):
+            result["ok"] = False
+            result["error"] = "IncompleteShieldResponse"
+        else:
+            result["user_attack"] = bool(user_analysis.get("attackDetected", False))
+            result["document_attacks"] = [
+                bool(d.get("attackDetected", False)) for d in doc_analysis
+            ]
     except Exception as e:  # noqa: BLE001 - report, never raise into the graph
-        log.warning("prompt shields check failed: %s", e)
+        log.warning("prompt shields check failed: %s", type(e).__name__)
         result["ok"] = False
-        result["error"] = str(e)[:200]
+        result["error"] = type(e).__name__
     return result
 
 
@@ -101,10 +107,17 @@ def check_groundedness(answer: str, context_block: str) -> dict:
             _, _, reason = text.partition(":")
             result["reason"] = reason.strip()[:200]
     except Exception as e:  # noqa: BLE001
-        log.warning("groundedness check failed: %s", e)
+        log.warning("groundedness check failed: %s", type(e).__name__)
         result["ok"] = False
-        result["error"] = str(e)[:200]
+        result["error"] = type(e).__name__
     return result
+
+
+def _split(text: str, size: int) -> list[str]:
+    """Split into <=size-char segments (Azure Language caps a document ~5120)."""
+    if len(text) <= size:
+        return [text]
+    return [text[i : i + size] for i in range(0, len(text), size)]
 
 
 def detect_pii(text: str) -> dict:
@@ -121,17 +134,23 @@ def detect_pii(text: str) -> dict:
         cats = [c.strip() for c in settings.pii_categories.split(",") if c.strip()]
         if cats:
             kwargs["categories_filter"] = cats
-        resp = language_client().recognize_pii_entities([text], **kwargs)[0]
-        if resp.is_error:
-            raise RuntimeError(f"{resp.error.code}: {resp.error.message}")
-        result["redacted"] = resp.redacted_text
-        categories: dict[str, int] = {}
-        for entity in resp.entities:
-            categories[entity.category] = categories.get(entity.category, 0) + 1
+        # Split long answers so none exceeds the service's per-document cap, then
+        # stitch the redacted segments back together.
+        segments = _split(text, 5000)
+        responses = language_client().recognize_pii_entities(segments, **kwargs)
+        redacted_parts, categories, count = [], {}, 0
+        for resp in responses:
+            if resp.is_error:
+                raise RuntimeError(resp.error.code)
+            redacted_parts.append(resp.redacted_text)
+            for entity in resp.entities:
+                categories[entity.category] = categories.get(entity.category, 0) + 1
+            count += len(resp.entities)
+        result["redacted"] = "".join(redacted_parts)
         result["categories"] = categories
-        result["count"] = len(resp.entities)
+        result["count"] = count
     except Exception as e:  # noqa: BLE001
-        log.warning("PII detection failed: %s", e)
+        log.warning("PII detection failed: %s", type(e).__name__)
         result["ok"] = False
-        result["error"] = str(e)[:200]
+        result["error"] = type(e).__name__
     return result

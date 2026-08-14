@@ -41,20 +41,22 @@ def _install_stubs(monkeypatch, case: dict) -> None:
         store, "similarity_search", lambda vec, k=4: [dict(c) for c in stub.get("chunks", [])]
     )
 
+    shield_ok = stub.get("shield_ok", True)
+
     def _shield(user_prompt, documents):
         # guard_input calls with no documents; shield_chunks calls with the chunks.
         if not documents:
             return {
-                "ok": True,
+                "ok": shield_ok,
                 "user_attack": stub.get("shield_user_attack", False),
                 "document_attacks": [],
-                "error": None,
+                "error": None if shield_ok else "stub",
             }
         return {
-            "ok": True,
+            "ok": shield_ok,
             "user_attack": False,
             "document_attacks": stub.get("shield_doc_attacks", [False] * len(documents)),
-            "error": None,
+            "error": None if shield_ok else "stub",
         }
 
     monkeypatch.setattr(safety, "shield_prompt", _shield)
@@ -63,7 +65,7 @@ def _install_stubs(monkeypatch, case: dict) -> None:
         safety,
         "check_groundedness",
         lambda answer, ctx: {
-            "ok": True,
+            "ok": stub.get("ground_ok", True),
             "grounded": stub.get("grounded", True),
             "reason": "",
             "error": None,
@@ -74,11 +76,11 @@ def _install_stubs(monkeypatch, case: dict) -> None:
         safety,
         "detect_pii",
         lambda text: {
-            "ok": True,
+            "ok": stub.get("pii_ok", True),
             "redacted": stub.get("pii_redacted", text),
             "categories": cats,
             "count": sum(cats.values()),
-            "error": None,
+            "error": None if stub.get("pii_ok", True) else "stub",
         },
     )
 
