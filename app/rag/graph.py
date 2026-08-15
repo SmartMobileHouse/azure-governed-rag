@@ -120,9 +120,9 @@ def _check_groundedness(state: RagState) -> dict:
         ctxs = state.get("contexts", [])
         context_block = "\n\n".join(f"[{c['doc_id']}:{c['ordinal']}] {c['content']}" for c in ctxs)
         res = safety.check_groundedness(state.get("answer", ""), context_block)
-        # Fail CLOSED when the check itself errored: treat as ungrounded so the
-        # answer is withheld (no HITL) or parked (HITL) instead of released.
-        grounded = res["grounded"] if res["ok"] else (not settings.safety_fail_closed)
+        # Fail CLOSED by default when the check itself errored: treat as ungrounded
+        # so the answer is withheld (no HITL) or parked (HITL) instead of released.
+        grounded = res["grounded"] if res["ok"] else (not settings.groundedness_fail_closed)
         gov["groundedness"] = {
             "ok": res["ok"],
             "grounded": grounded,
@@ -134,7 +134,7 @@ def _check_groundedness(state: RagState) -> dict:
 
     out: dict = {"grounded": grounded, "governance": gov}
     check = gov["groundedness"]
-    if not settings.hitl_enabled and not grounded and (check.get("ok") or settings.safety_fail_closed):
+    if not settings.hitl_enabled and not grounded and (check.get("ok") or settings.groundedness_fail_closed):
         out["answer"] = _UNGROUNDED_FALLBACK
     return out
 
@@ -182,9 +182,10 @@ def _needs_approval(state: RagState) -> tuple[bool, str]:
         reasons.append("PII detected in answer")
     terms = [t.strip().lower() for t in settings.hitl_sensitive_terms.split(",") if t.strip()]
     haystack = f"{state.get('question', '')} {state.get('answer', '')}".lower()
-    hits = [t for t in terms if t in haystack]
-    if hits:
-        reasons.append("sensitive terms: " + ", ".join(hits))
+    if any(t in haystack for t in terms):
+        # NB: never echo the matched literal term — it can be answer-derived and is
+        # returned to the requester in the pending reason. A structural marker only.
+        reasons.append("sensitive terms present")
     return bool(reasons), "; ".join(reasons)
 
 
@@ -348,6 +349,15 @@ def status(thread_id: str) -> dict | None:
     return _shape(snap.values, thread_id)
 
 
+def is_pending(thread_id: str) -> bool:
+    """Whether a thread is currently parked at the approval gate."""
+    cfg = {"configurable": {"thread_id": thread_id}}
+    with PostgresSaver.from_conn_string(db.conn_string()) as cp:
+        graph = _builder().compile(checkpointer=cp)
+        snap = graph.get_state(cfg)
+    return bool(snap.values) and bool(snap.next)
+
+
 def resume(thread_id: str, approved: bool, approver: str | None) -> dict:
     """Resume a parked turn with a human decision, then audit it. Callers gate
     this behind an atomic decision (threads.try_decide) so it runs at most once."""
@@ -357,8 +367,10 @@ def resume(thread_id: str, approved: bool, approver: str | None) -> dict:
         snap = graph.get_state(cfg)
         if not snap.values:
             return {"status": "not_found", "thread_id": thread_id}
-        if not snap.next:  # nothing pending → already resolved
-            return _shape(snap.values, thread_id)
+        if not snap.next:
+            # Not awaiting a decision — do NOT disclose the answer via this path
+            # (a thread that was never parked must not be readable by approving it).
+            return {"status": "not_pending", "thread_id": thread_id}
         result = graph.invoke(
             Command(resume={"approved": approved, "approver": approver}), cfg
         )

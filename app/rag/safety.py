@@ -37,6 +37,14 @@ _GROUND_SYSTEM = (
 )
 
 
+def _attack_flag(analysis: object) -> bool | None:
+    """The attackDetected boolean from one analysis, or None if it's malformed."""
+    if not isinstance(analysis, dict):
+        return None
+    value = analysis.get("attackDetected")
+    return value if isinstance(value, bool) else None
+
+
 def shield_prompt(user_prompt: str, documents: list[str]) -> dict:
     """Run Prompt Shields over the user prompt and any documents (chunks).
 
@@ -64,19 +72,26 @@ def shield_prompt(user_prompt: str, documents: list[str]) -> dict:
         )
         resp.raise_for_status()
         data = resp.json()
-        user_analysis = data.get("userPromptAnalysis")
         doc_analysis = data.get("documentsAnalysis")
-        # Strict: require the expected shape and exactly one analysis per document.
-        # A partial/malformed response is treated as a failed check (ok=False), so
-        # the fail-closed policy quarantines rather than trusting missing results.
-        if user_analysis is None or doc_analysis is None or len(doc_analysis) != len(documents):
+        user_attack = _attack_flag(data.get("userPromptAnalysis"))
+        doc_attacks = (
+            [_attack_flag(d) for d in doc_analysis] if isinstance(doc_analysis, list) else None
+        )
+        # Strict: exactly one WELL-FORMED analysis (attackDetected must be a real
+        # bool) per document, plus the user analysis. Anything missing or malformed
+        # is a failed check (ok=False), so the fail-closed policy quarantines
+        # rather than trusting an incomplete or type-confused response.
+        if (
+            user_attack is None
+            or doc_attacks is None
+            or len(doc_attacks) != len(documents)
+            or any(x is None for x in doc_attacks)
+        ):
             result["ok"] = False
-            result["error"] = "IncompleteShieldResponse"
+            result["error"] = "MalformedShieldResponse"
         else:
-            result["user_attack"] = bool(user_analysis.get("attackDetected", False))
-            result["document_attacks"] = [
-                bool(d.get("attackDetected", False)) for d in doc_analysis
-            ]
+            result["user_attack"] = user_attack
+            result["document_attacks"] = doc_attacks
     except Exception as e:  # noqa: BLE001 - report, never raise into the graph
         log.warning("prompt shields check failed: %s", type(e).__name__)
         result["ok"] = False

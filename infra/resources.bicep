@@ -250,6 +250,12 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       activeRevisionsMode: 'Single'
       ingress: { external: true, targetPort: 8000, transport: 'auto' }
       registries: [ { server: acr.properties.loginServer, identity: uami.id } ]
+      // HMAC pepper for audit/ownership pseudonyms. Deterministic per (sub, RG) so
+      // it's stable across redeploys and not publicly derivable. A Key Vault secret
+      // reference is the stronger hardening path (see governance-mapping.md).
+      secrets: [
+        { name: 'audit-hash-key', value: guid(subscription().id, resourceGroup().id, 'audit-hash-key') }
+      ]
     }
     template: {
       containers: [
@@ -269,6 +275,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'POSTGRES_HOST', value: postgres.properties.fullyQualifiedDomainName }
             { name: 'POSTGRES_DB', value: 'appdb' }
             { name: 'POSTGRES_USER', value: uami.name }
+            { name: 'AUDIT_HASH_KEY', secretRef: 'audit-hash-key' }
           ]
         }
       ]

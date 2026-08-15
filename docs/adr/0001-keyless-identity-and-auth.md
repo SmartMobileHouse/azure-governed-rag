@@ -25,3 +25,10 @@ Language, and Postgres all support Entra (Azure AD) authentication.
   first local calls occasionally need a short wait.
 - A fresh managed identity's object id isn't known at deploy-start, so the
   Postgres role grant is done in a post-provision hook, not in Bicep.
+- **Easy Auth is the authentication trust boundary.** The app reads the injected
+  `X-MS-CLIENT-PRINCIPAL-NAME` (canonicalized) and requires it, but does not
+  independently validate the Entra JWT — so it does *not* defend against Easy
+  Auth being absent (a forged header would then be trusted). Container Apps
+  strips client-supplied `X-MS-*` headers while Easy Auth is enabled, which is
+  what makes the value trustworthy. In-app JWT validation (issuer / audience /
+  signature via JWKS) is the hardening path for zero-trust or self-hosted runs.

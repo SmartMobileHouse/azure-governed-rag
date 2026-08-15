@@ -45,6 +45,16 @@ def test_allowlisted_reviewer_only(monkeypatch):
     assert auth.is_approver("alice@corp.com") is False
 
 
+def test_identity_is_canonicalized(monkeypatch):
+    # Mixed case must not diverge between ownership hashing and the allowlist,
+    # or a requester recorded as "Alice@" could dodge the self-approval check.
+    monkeypatch.setattr(settings, "auth_disabled", False)
+    assert auth.require_principal(_Req({"x-ms-client-principal-name": "Alice@Corp.com "})) == "alice@corp.com"
+    monkeypatch.setattr(settings, "hitl_approver_emails", "Boss@Corp.com")
+    assert auth.is_approver("boss@corp.com") is True
+    assert auth.is_approver("BOSS@CORP.COM") is True
+
+
 def test_pending_response_hides_the_answer():
     it = SimpleNamespace(value={"reason": "sensitive terms matched (1)"})
     shaped = graph._shape(

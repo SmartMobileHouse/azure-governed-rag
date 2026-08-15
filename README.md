@@ -92,13 +92,19 @@ envelope recording what each check decided:
 | `pii` | Azure AI Language | PII → **masked** (types + counts recorded) |
 | `approval_gate` | LangGraph `interrupt` | sensitive/low-confidence → **parks for a human** |
 
-Positive detections always act; a `*_fail_closed` policy governs what happens
-when a check itself is unavailable (default: fail-open + flag).
+Positive detections always act. When a check itself can't run, the fail-policy
+decides: **PII and groundedness fail closed by default** (withhold or park); the
+input/chunk shields follow `SAFETY_FAIL_CLOSED` (default open, flagged).
 
 ## API
 
-All endpoints require a validated Entra identity (Easy Auth). The server mints
-every `thread_id` and binds it to the caller.
+All endpoints require an Entra identity. **Easy Auth is the authentication
+boundary** — it validates the token and injects the caller's identity, and (while
+enabled) Container Apps strips client-supplied `X-MS-*` headers. The app requires
+that injected principal and rejects requests without it, but does **not**
+independently validate the token; in-app JWT validation is a documented hardening
+path (see [ADR 0001](docs/adr/0001-keyless-identity-and-auth.md)). The server
+mints every `thread_id` and binds it to the caller.
 
 | Endpoint | Who | Purpose |
 |---|---|---|
@@ -200,8 +206,9 @@ Governance is tunable via environment variables (see `app/config.py`):
 | `HITL_APPROVER_EMAILS` | `""` | reviewer allowlist — **empty authorizes no one** (set it to use the gate) |
 | `HITL_SENSITIVE_TERMS` | `""` | terms that route a turn to approval |
 | `HITL_ON_PII` | `false` | also route PII-containing answers to approval |
-| `SAFETY_FAIL_CLOSED` | `false` | block/withhold when a safety check itself errors |
-| `AUDIT_HASH_KEY` | `""` | HMAC key (Key Vault secret) for audit/ownership pseudonyms; unset = unsalted SHA-256 (dev) |
+| `GROUNDEDNESS_FAIL_CLOSED` | `true` | withhold/park the answer if the groundedness check can't run |
+| `SAFETY_FAIL_CLOSED` | `false` | block/quarantine when an **input/chunk shield** check itself errors |
+| `AUDIT_HASH_KEY` | provisioned | HMAC key for audit/ownership pseudonyms — `azd` sets it as a Container Apps secret; a Key Vault reference is the stronger path |
 
 ## Data handling & retention
 

@@ -26,7 +26,7 @@ def test_shield_partial_document_response_is_not_ok(monkeypatch):
     )
     res = safety.shield_prompt("q", ["chunk-a", "chunk-b"])
     assert res["ok"] is False
-    assert res["error"] == "IncompleteShieldResponse"
+    assert res["error"] == "MalformedShieldResponse"
 
 
 def test_shield_complete_response_ok(monkeypatch):
@@ -42,6 +42,21 @@ def test_shield_complete_response_ok(monkeypatch):
     assert res["ok"] is True
     assert res["user_attack"] is True
     assert res["document_attacks"] == [False, True]
+
+
+def test_shield_malformed_attackdetected_is_not_ok(monkeypatch):
+    # Right document count, but attackDetected is not a real boolean → fail closed.
+    monkeypatch.setattr(safety, "cognitive_token", lambda: "tok")
+    monkeypatch.setattr(
+        safety.httpx, "post",
+        lambda *a, **k: _FakeResp(
+            {"userPromptAnalysis": {"attackDetected": "yes"},
+             "documentsAnalysis": [{"attackDetected": False}]}
+        ),
+    )
+    res = safety.shield_prompt("q", ["chunk-a"])
+    assert res["ok"] is False
+    assert res["error"] == "MalformedShieldResponse"
 
 
 def test_split_long_text():

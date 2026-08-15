@@ -77,3 +77,16 @@ def decision(thread_id: str) -> str | None:
         cur.execute("SELECT decision FROM threads WHERE thread_id = %s", (thread_id,))
         row = cur.fetchone()
     return row[0] if row else None
+
+
+def reset_decision(thread_id: str) -> None:
+    """Revert a claimed-but-unapplied decision so a failed resume can be retried
+    (avoids stranding the turn as permanently 'already_decided')."""
+    try:
+        with db.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE threads SET decision = NULL, decided_at = NULL WHERE thread_id = %s",
+                (thread_id,),
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("decision reset failed (%s): %s", thread_id, type(e).__name__)

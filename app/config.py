@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # M2 safety layer
     safety_enabled: bool = True  # Prompt Shields on input + chunks
     groundedness_enabled: bool = True  # LLM self-check on the answer
+    # Groundedness fails CLOSED by default (like PII): if the check can't run, the
+    # answer is treated as ungrounded (withheld or parked) rather than released.
+    groundedness_fail_closed: bool = True
     # When a safety check *itself* errors (service down/unreachable): False = allow
     # but flag the failure (fail-open, availability-first); True = block/degrade
     # (fail-closed, strict). Positive detections always act regardless of this.
