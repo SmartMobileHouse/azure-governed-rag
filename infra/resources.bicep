@@ -257,7 +257,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       // HMAC pepper for audit/ownership pseudonyms. Normally a random value the
       // preflight hook generated and persisted in the azd env (auditHashKey). The
       // guid() is only an ARM-safe fallback if that wasn't set; a Key Vault secret
-      // reference is the stronger hardening path (see governance-mapping.md).
+      // reference is the stronger hardening path.
       secrets: [
         {
           name: 'audit-hash-key'

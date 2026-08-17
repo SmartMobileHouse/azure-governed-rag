@@ -20,7 +20,7 @@ if [ -z "$(azd env get-value AUDIT_HASH_KEY 2>/dev/null)" ]; then
   if [ -n "$KEY" ] && azd env set AUDIT_HASH_KEY "$KEY" >/dev/null 2>&1; then
     echo "  Generated a random AUDIT_HASH_KEY (persisted to this azd env)."
   else
-    echo "  ! could not set AUDIT_HASH_KEY — audit pseudonyms will fall back to unsalted hashing."
+    echo "  ! could not set AUDIT_HASH_KEY — the deploy will use the deterministic fallback key; re-run after 'az login' for a random one."
   fi
 fi
 
