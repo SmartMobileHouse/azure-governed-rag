@@ -173,13 +173,17 @@ def _decide(thread_id: str, approved: bool, principal: str) -> dict:
         raise HTTPException(status_code=404, detail="thread not found")
     if threads.is_owner(thread_id, principal):
         raise HTTPException(status_code=403, detail="a requester cannot approve their own turn")
+    # Idempotent: a thread already decided returns that decision (not a 409).
+    existing = threads.decision(thread_id)
+    if existing is not None:
+        return {"status": "already_decided", "thread_id": thread_id, "decision": existing}
     # Only a turn actually parked at the gate can be decided — approving a turn
     # that was never routed for review must not release its answer.
     if not graph.is_pending(thread_id):
         raise HTTPException(status_code=409, detail="no turn is awaiting a decision on this thread")
     decision = "approved" if approved else "rejected"
     if not threads.try_decide(thread_id, decision):
-        # Already decided by a concurrent/earlier call — idempotent.
+        # Lost a concurrent race — return the decision that won.
         return {"status": "already_decided", "thread_id": thread_id,
                 "decision": threads.decision(thread_id)}
     try:

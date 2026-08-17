@@ -13,6 +13,17 @@ if ! az account show >/dev/null 2>&1; then
 fi
 echo "  Subscription: $(az account show --query name -o tsv)"
 
+# Ensure a stable, RANDOM HMAC pepper for audit/ownership pseudonyms exists in the
+# azd env (generated once, reused on every redeploy so ownership hashes stay valid).
+if [ -z "$(azd env get-value AUDIT_HASH_KEY 2>/dev/null)" ]; then
+  KEY="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  if [ -n "$KEY" ] && azd env set AUDIT_HASH_KEY "$KEY" >/dev/null 2>&1; then
+    echo "  Generated a random AUDIT_HASH_KEY (persisted to this azd env)."
+  else
+    echo "  ! could not set AUDIT_HASH_KEY — audit pseudonyms will fall back to unsalted hashing."
+  fi
+fi
+
 if [ -z "$LOCATION" ]; then
   echo "  AZURE_LOCATION not set yet — azd will prompt. Re-run after choosing a region."
   exit 0

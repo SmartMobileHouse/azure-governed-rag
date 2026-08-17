@@ -19,6 +19,10 @@ param chatCapacity int
 param embeddingCapacity int
 param deploymentSku string
 
+@secure()
+param auditHashKey string = ''
+param hitlApproverEmails string = ''
+
 var abbrs = {
   law: 'log-${resourceToken}'
   appi: 'appi-${resourceToken}'
@@ -250,11 +254,15 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       activeRevisionsMode: 'Single'
       ingress: { external: true, targetPort: 8000, transport: 'auto' }
       registries: [ { server: acr.properties.loginServer, identity: uami.id } ]
-      // HMAC pepper for audit/ownership pseudonyms. Deterministic per (sub, RG) so
-      // it's stable across redeploys and not publicly derivable. A Key Vault secret
+      // HMAC pepper for audit/ownership pseudonyms. Normally a random value the
+      // preflight hook generated and persisted in the azd env (auditHashKey). The
+      // guid() is only an ARM-safe fallback if that wasn't set; a Key Vault secret
       // reference is the stronger hardening path (see governance-mapping.md).
       secrets: [
-        { name: 'audit-hash-key', value: guid(subscription().id, resourceGroup().id, 'audit-hash-key') }
+        {
+          name: 'audit-hash-key'
+          value: !empty(auditHashKey) ? auditHashKey : guid(subscription().id, resourceGroup().id, 'audit-hash-key')
+        }
       ]
     }
     template: {
@@ -276,6 +284,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'POSTGRES_DB', value: 'appdb' }
             { name: 'POSTGRES_USER', value: uami.name }
             { name: 'AUDIT_HASH_KEY', secretRef: 'audit-hash-key' }
+            { name: 'HITL_APPROVER_EMAILS', value: hitlApproverEmails }
           ]
         }
       ]

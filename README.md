@@ -116,10 +116,12 @@ mints every `thread_id` and binds it to the caller.
 | `GET /smoke` | caller | Proves the keyless chain end to end (chat, embedding, Content Safety, pgvector). |
 | `GET /health` · `/ready` | open | Liveness · dependency + database readiness. |
 
-**Human-in-the-loop flow:** a flagged turn parks and the requester gets a
-*reason only*. An authorized reviewer (`HITL_APPROVER_EMAILS`, never the
-requester) reads `/pending`, then `/approve` or `/reject`. The requester polls
-`GET /threads/{id}` and receives the answer only once it's approved.
+**Human-in-the-loop flow:** the gate activates only when a reviewer is configured
+(`HITL_APPROVER_EMAILS`); with none set, a flagged turn resolves to a withheld/
+fallback answer instead of parking, so it can never strand. When active, a
+flagged turn parks and the requester gets a *reason only*. An authorized reviewer
+(never the requester) reads `/pending`, then `/approve` or `/reject`, and the
+requester polls `GET /threads/{id}` and receives the answer only once approved.
 
 ## Deploy
 
@@ -203,12 +205,12 @@ Governance is tunable via environment variables (see `app/config.py`):
 | `PII_ENABLED` / `PII_CATEGORIES` | `true` / sensitive set | mask PII; the allowlist excludes noisy types (PersonType, Organization) |
 | `PII_FAIL_CLOSED` | `true` | withhold the answer if the PII check can't run |
 | `HITL_ENABLED` | `true` | human approval gate |
-| `HITL_APPROVER_EMAILS` | `""` | reviewer allowlist — **empty authorizes no one** (set it to use the gate) |
-| `HITL_SENSITIVE_TERMS` | `""` | terms that route a turn to approval |
+| `HITL_APPROVER_EMAILS` | `""` | reviewer allowlist. **Empty = the gate never activates** — a turn resolves (fallback/withheld) instead of parking, so it can't strand. Set it (a Bicep param wires it at deploy) to turn the gate on. |
+| `HITL_SENSITIVE_TERMS` | `""` | terms that route a turn to approval (only when a reviewer is configured) |
 | `HITL_ON_PII` | `false` | also route PII-containing answers to approval |
 | `GROUNDEDNESS_FAIL_CLOSED` | `true` | withhold/park the answer if the groundedness check can't run |
 | `SAFETY_FAIL_CLOSED` | `false` | block/quarantine when an **input/chunk shield** check itself errors |
-| `AUDIT_HASH_KEY` | provisioned | HMAC key for audit/ownership pseudonyms — `azd` sets it as a Container Apps secret; a Key Vault reference is the stronger path |
+| `AUDIT_HASH_KEY` | random, provisioned | HMAC key for audit/ownership pseudonyms. The **preflight hook generates a random key** and persists it in the azd env (stable across redeploys); a Key Vault reference is the stronger path. |
 
 ## Data handling & retention
 

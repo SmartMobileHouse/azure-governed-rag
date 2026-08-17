@@ -33,7 +33,7 @@ def require_principal(request: Request) -> str:
     anywhere deployed.
     """
     name = request.headers.get("x-ms-client-principal-name")
-    if name:
+    if name and name.strip():
         return _canonical(name)
     if settings.auth_disabled:
         return "local-dev"

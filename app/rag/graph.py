@@ -28,6 +28,7 @@ from langgraph.types import Command, interrupt
 
 from .. import db, threads
 from ..config import settings
+from ..hashing import pseudonym
 from . import audit, llm, safety, store
 
 _REFUSAL = (
@@ -134,7 +135,10 @@ def _check_groundedness(state: RagState) -> dict:
 
     out: dict = {"grounded": grounded, "governance": gov}
     check = gov["groundedness"]
-    if not settings.hitl_enabled and not grounded and (check.get("ok") or settings.groundedness_fail_closed):
+    # When HITL isn't active (disabled, or no reviewer configured), an ungrounded
+    # answer resolves to the safe fallback here rather than parking with no one to
+    # decide it.
+    if not settings.hitl_active() and not grounded and (check.get("ok") or settings.groundedness_fail_closed):
         out["answer"] = _UNGROUNDED_FALLBACK
     return out
 
@@ -190,7 +194,9 @@ def _needs_approval(state: RagState) -> tuple[bool, str]:
 
 
 def _route_after_checks(state: RagState) -> str:
-    if not settings.hitl_enabled:
+    # Only route to the gate when HITL is active (enabled AND a reviewer exists),
+    # so a turn never parks with no one able to approve it.
+    if not settings.hitl_active():
         return "end"
     needs, _ = _needs_approval(state)
     return "approval_gate" if needs else "end"
@@ -211,7 +217,9 @@ def _approval_gate(state: RagState) -> dict:
         "required": True,
         "reason": reason,
         "approved": approved,
-        "approver": approver,
+        # Store the pseudonym, never the raw approver — this envelope is also
+        # returned to the requester (owner) once the turn resolves.
+        "approver_hash": pseudonym(approver, "approver"),
     }
     out: dict = {"approved": approved, "governance": gov}
     if not approved:

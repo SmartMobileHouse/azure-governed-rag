@@ -27,6 +27,7 @@ CRITICAL_KINDS = {
     "ground_fail_closed",
     "pii_fail_closed",
     "shield_fail_closed",
+    "hitl_no_reviewer",
 }
 
 

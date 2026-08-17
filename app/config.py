@@ -92,5 +92,13 @@ class Settings(BaseSettings):
     # local checks for dev — it MUST be false anywhere deployed.
     auth_disabled: bool = False
 
+    def hitl_active(self) -> bool:
+        """HITL only *acts* when it is enabled AND at least one reviewer is
+        configured. Otherwise a parked turn could never be decided by anyone, so
+        it must NOT park — it resolves to the fallback/withheld path instead. This
+        makes a default deploy safe: the gate activates only once reviewers exist."""
+        reviewers = [e for e in self.hitl_approver_emails.split(",") if e.strip()]
+        return self.hitl_enabled and bool(reviewers)
+
 
 settings = Settings()

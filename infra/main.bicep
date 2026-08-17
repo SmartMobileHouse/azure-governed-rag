@@ -32,6 +32,13 @@ param embeddingCapacity int = 20
 @description('Deployment SKU. GlobalStandard is the most broadly available (e.g. text-embedding-3-small has no regional Standard in Sweden Central).')
 param deploymentSku string = 'GlobalStandard'
 
+@secure()
+@description('Random HMAC pepper for audit/ownership pseudonyms. The preflight hook generates and persists one in the azd env; a Key Vault reference is the stronger path.')
+param auditHashKey string = ''
+
+@description('Comma-separated reviewer allowlist for the HITL approval gate (HITL_APPROVER_EMAILS). Empty = the gate never activates (no one can approve).')
+param hitlApproverEmails string = ''
+
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
 
@@ -55,6 +62,8 @@ module resources 'resources.bicep' = {
     chatCapacity: chatCapacity
     embeddingCapacity: embeddingCapacity
     deploymentSku: deploymentSku
+    auditHashKey: auditHashKey
+    hitlApproverEmails: hitlApproverEmails
   }
 }
 

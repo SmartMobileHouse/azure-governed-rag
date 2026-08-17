@@ -124,7 +124,9 @@ def _safe_governance(gov: dict | None) -> dict:
     if isinstance(ap, dict):
         out["approval"] = _drop_none(
             {"required": ap.get("required"), "approved": ap.get("approved"),
-             "approver_hash": pseudonym(ap.get("approver"), "approver"),
+             # approver arrives already pseudonymized from the graph; never re-copy
+             # a raw approver, and fall back to hashing one only if present.
+             "approver_hash": ap.get("approver_hash") or pseudonym(ap.get("approver"), "approver"),
              "reason_codes": _reason_codes(ap.get("reason")) or None}
         )
     return out

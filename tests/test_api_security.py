@@ -55,6 +55,16 @@ def test_identity_is_canonicalized(monkeypatch):
     assert auth.is_approver("BOSS@CORP.COM") is True
 
 
+def test_hitl_active_requires_a_configured_reviewer(monkeypatch):
+    monkeypatch.setattr(settings, "hitl_enabled", True)
+    monkeypatch.setattr(settings, "hitl_approver_emails", "")
+    assert settings.hitl_active() is False  # enabled but no reviewer → won't park
+    monkeypatch.setattr(settings, "hitl_approver_emails", "boss@corp.com")
+    assert settings.hitl_active() is True
+    monkeypatch.setattr(settings, "hitl_enabled", False)
+    assert settings.hitl_active() is False
+
+
 def test_pending_response_hides_the_answer():
     it = SimpleNamespace(value={"reason": "sensitive terms matched (1)"})
     shaped = graph._shape(
