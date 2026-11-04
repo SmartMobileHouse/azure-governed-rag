@@ -8,6 +8,8 @@ trail**. One command to stand it up (`azd up`).
 
 > Built and maintained by [Smart Mobile House](https://smartmobilehouse.com) —
 > secure AI implementation for enterprise.
+>
+> Engineering write-up: [governed RAG architecture with LangGraph](https://smartmobilehouse.com/blog/governed-rag-langgraph/).
 
 Most "enterprise AI" starters are a chatbot with an API key. This is the
 opposite: the boring, hard, regulated parts *are* the product. It's a reference
